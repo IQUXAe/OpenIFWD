@@ -84,9 +84,13 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
 int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     if (!s || !psi_fls) return -1;
 
-    /* Prioritize Tag 12 (IMAGE_DATA) because Tag 11 is only 1.6KB of partition metadata */
-    const fls_chunk_info_t *chunk = fls_find_chunk(psi_fls, FLS_TAG_IMAGE_DATA);
-    if (!chunk) {
+    /* Select Tag 18 (NVM / RPSI: 57KB) if present and <= 0xFFFF bytes (fits internal SRAM).
+     * Fallback to Tag 12 (IMAGE_DATA) or Tag 11 (PSI_RAM). */
+    const fls_chunk_info_t *chunk = fls_find_chunk(psi_fls, FLS_TAG_NVM);
+    if (!chunk || chunk->payload_size > 0xFFFF) {
+        chunk = fls_find_chunk(psi_fls, FLS_TAG_IMAGE_DATA);
+    }
+    if (!chunk || chunk->payload_size > 0xFFFF) {
         chunk = fls_find_chunk(psi_fls, FLS_TAG_PSI_RAM);
     }
     if (!chunk) {
@@ -96,36 +100,69 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
 
     size_t psi_size = 0;
     const uint8_t *psi_data = fls_get_chunk_payload(psi_fls, chunk, &psi_size);
-    printf("[*] Uploading Primary Stage Initializer (PSI: %zu bytes)...\n", psi_size);
+    if (!psi_data || psi_size == 0 || psi_size > 0xFFFF) {
+        fprintf(stderr, "[-] Invalid PSI payload size: %zu bytes (max 65535 for Boot ROM)\n", psi_size);
+        return -1;
+    }
+    printf("[*] Uploading Primary Stage Initializer (PSI chunk Tag %u: %zu bytes)...\n", chunk->tag, psi_size);
 
-    /* 1. Send load length */
-    uint8_t tx_buf[512];
-    uint32_t len_val = (uint32_t)psi_size;
-    size_t pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_BOOT_TX_LOAD_LEN, &len_val, sizeof(len_val), tx_buf, sizeof(tx_buf));
-    transport_write(s->transport, tx_buf, pkt_len);
+    /* 1. Low-level Boot ROM Header: [0x30, len_lo, len_hi, 0xFF] (4 bytes, 32-bit aligned) */
+    uint8_t boot_hdr[4];
+    boot_hdr[0] = 0x30;
+    boot_hdr[1] = (uint8_t)(psi_size & 0xFF);
+    boot_hdr[2] = (uint8_t)((psi_size >> 8) & 0xFF);
+    boot_hdr[3] = 0xFF;
 
-    /* Wait ACK */
+    if (transport_write(s->transport, boot_hdr, sizeof(boot_hdr)) != (int)sizeof(boot_hdr)) {
+        fprintf(stderr, "[-] Failed to write Boot ROM 0x30 header\n");
+        return -1;
+    }
+
+    /* 2. Stream raw PSI payload */
+    if (transport_write(s->transport, psi_data, psi_size) != (int)psi_size) {
+        fprintf(stderr, "[-] Failed to write PSI payload\n");
+        return -1;
+    }
+
+    /* 3. Send 1-byte XOR-8 checksum of payload */
+    uint8_t chk8 = 0;
+    for (size_t i = 0; i < psi_size; i++) {
+        chk8 ^= psi_data[i];
+    }
+
+    if (transport_write(s->transport, &chk8, 1) != 1) {
+        fprintf(stderr, "[-] Failed to write PSI XOR-8 checksum\n");
+        return -1;
+    }
+
+    /* 4. Wait for Target Boot ROM ACK (expected: 0x01, or 0x0B, 0xB1, 0xC1) */
     uint8_t ack = 0;
-    int r = transport_read(s->transport, &ack, 1, 3000);
-    if (r <= 0) {
-        printf("[!] No direct length ACK, sending payload directly...\n");
+    int r = transport_read(s->transport, &ack, 1, 5000);
+    if (r > 0) {
+        printf("[+] PSI acknowledged by Boot ROM (Ack: 0x%02X)\n", ack);
+        if (ack == 0x01 || ack == 0x0B || ack == 0xB1 || ack == 0xC1) {
+            printf("[+] PSI successfully executed by Boot ROM!\n");
+        } else {
+            printf("[!] Unexpected ACK byte: 0x%02X, continuing anyway...\n", ack);
+        }
+    } else {
+        printf("[!] No ACK received from Boot ROM within 5s, proceeding...\n");
     }
 
-    /* 2. Send PSI payload */
-    transport_write(s->transport, psi_data, psi_size);
+    /* Allow PSI to initialize clocks, DDR SDRAM, and peripheral controllers */
+    usleep(150000);
 
-    /* 3. Send checksum */
-    uint16_t chk = ifwd_calc_xor16(psi_data, psi_size);
-    pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_BOOT_TX_EBL_LDR_CHK, &chk, sizeof(chk), tx_buf, sizeof(tx_buf));
-    transport_write(s->transport, tx_buf, pkt_len);
-
-    r = transport_read(s->transport, &ack, 1, 5000);
-    if (r > 0 && (ack == 0x55 || ack == 0x06 || ack == 0x00)) {
-        printf("[+] PSI uploaded and verified! (Ack: 0x%02X)\n", ack);
-        return 0;
+    /* Drain any startup announcements or version info from PSI */
+    uint8_t startup_buf[128];
+    int sn;
+    while ((sn = transport_read(s->transport, startup_buf, sizeof(startup_buf), 200)) > 0) {
+        printf("[*] PSI announcement (%d bytes): ", sn);
+        for (int i = 0; i < sn; i++) {
+            printf("0x%02X ", startup_buf[i]);
+        }
+        printf("\n");
     }
 
-    printf("[+] PSI injected, continuing boot sequence.\n");
     return 0;
 }
 
