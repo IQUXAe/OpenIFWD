@@ -1,0 +1,26 @@
+# Build outputs
+openifwd
+openifwd-gui
+flashtool
+flashtool-gui
+test_runner
+
+# Object files and libraries
+*.o
+*.a
+*.so
+
+# Proprietary binaries, firmware images and logs
+firmware/
+FlashTool_E2_OD/
+*.fls
+*.dffs
+*.bin
+*.log
+
+# Editor & temporary files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
