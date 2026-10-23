@@ -35,16 +35,23 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
     uint8_t at_cmd[] = "ATAT\r\n";
     uint8_t rx_buf[64];
 
+    /* Set DTR/RTS once before sync loop */
+    transport_set_control(s->transport, true, true);
+
     while (time(NULL) - start < timeout_sec) {
-        /* Toggle RTS/DTR signals to stimulate Infineon bootrom */
-        transport_set_control(s->transport, true, true);
         transport_write(s->transport, at_cmd, 4);
 
         int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 200);
         if (n > 0) {
+            printf("[*] Received %d byte(s) from target: ", n);
             for (int i = 0; i < n; i++) {
-                /* Target ROM typically answers with 'A', 'T', 0x55, 0x06 (ACK) */
-                if (rx_buf[i] == 0x55 || rx_buf[i] == 0x06 || rx_buf[i] == 'A') {
+                printf("0x%02X ", rx_buf[i]);
+            }
+            printf("\n");
+
+            for (int i = 0; i < n; i++) {
+                /* Target ROM typically answers with Chip ID (e.g. 0x15, 0x16) or 'A', 'T', 0x55, 0x06 */
+                if (rx_buf[i] != 0x00) {
                     printf("[+] Device synchronized successfully! Received: 0x%02X\n", rx_buf[i]);
                     transport_flush(s->transport);
                     return 0;
