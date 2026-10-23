@@ -1,8 +1,13 @@
+#define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #include "transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <time.h>
 #include <libusb-1.0/libusb.h>
 
 typedef struct {
@@ -24,47 +29,91 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
 
     /* Known Samsung & Infineon Vendor IDs */
     static const struct { uint16_t vid; uint16_t pid; } known_devices[] = {
+        { 0x058b, 0x0041 }, /* Infineon Flash Loader utility (Boot ROM) */
+        { 0x058b, 0x0015 }, /* Infineon FlashUSB */
         { 0x04e8, 0x6860 }, /* Samsung USB */
         { 0x04e8, 0x6601 }, /* Samsung Download Mode */
-        { 0x058b, 0x0015 }, /* Infineon FlashUSB */
         { 0x1519, 0x0020 }, /* Comneon / Infineon modem */
         { 0x1519, 0x0452 }, /* Infineon X-GOLD USB */
         { 0, 0 }
     };
 
     uint16_t target_vid = 0, target_pid = 0;
-    if (device_name && sscanf(device_name, "%hx:%hx", &target_vid, &target_pid) == 2) {
-        priv->dev_handle = libusb_open_device_with_vid_pid(priv->ctx, target_vid, target_pid);
-    } else {
-        /* Auto-probe known devices */
-        for (int i = 0; known_devices[i].vid != 0; i++) {
-            priv->dev_handle = libusb_open_device_with_vid_pid(priv->ctx, known_devices[i].vid, known_devices[i].pid);
-            if (priv->dev_handle) {
-                printf("Found Infineon/Samsung USB device: %04x:%04x\n", known_devices[i].vid, known_devices[i].pid);
-                break;
+    bool has_target = (device_name && sscanf(device_name, "%hx:%hx", &target_vid, &target_pid) == 2);
+
+    printf("[*] Waiting for phone connection on USB (hold Volume Down and insert USB cable)...\n");
+    time_t start = time(NULL);
+    while (time(NULL) - start < 30) {
+        if (has_target) {
+            priv->dev_handle = libusb_open_device_with_vid_pid(priv->ctx, target_vid, target_pid);
+        } else {
+            /* Auto-probe known devices */
+            for (int i = 0; known_devices[i].vid != 0; i++) {
+                priv->dev_handle = libusb_open_device_with_vid_pid(priv->ctx, known_devices[i].vid, known_devices[i].pid);
+                if (priv->dev_handle) {
+                    printf("[+] Found Infineon/Samsung USB device: %04x:%04x\n", known_devices[i].vid, known_devices[i].pid);
+                    break;
+                }
             }
         }
+        if (priv->dev_handle) break;
+        usleep(20000); /* 20ms poll */
     }
 
     if (!priv->dev_handle) {
+        fprintf(stderr, "[-] Timeout waiting for USB device\n");
         return -1;
     }
 
-    /* Detach kernel driver if active */
-    if (libusb_kernel_driver_active(priv->dev_handle, 0) == 1) {
-        libusb_detach_kernel_driver(priv->dev_handle, 0);
+    /* Fallback default bulk endpoints */
+    priv->ep_out = 0x01;
+    priv->ep_in  = 0x81;
+    priv->interface_number = -1;
+
+    /* Discover actual bulk endpoints and interface from descriptor */
+    struct libusb_config_descriptor *conf_desc = NULL;
+    if (libusb_get_active_config_descriptor(libusb_get_device(priv->dev_handle), &conf_desc) == 0) {
+        for (int i = 0; i < conf_desc->bNumInterfaces; i++) {
+            for (int a = 0; a < conf_desc->interface[i].num_altsetting; a++) {
+                const struct libusb_interface_descriptor *iface = &conf_desc->interface[i].altsetting[a];
+                for (int e = 0; e < iface->bNumEndpoints; e++) {
+                    const struct libusb_endpoint_descriptor *ep = &iface->endpoint[e];
+                    if ((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK) {
+                        if ((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN) {
+                            priv->ep_in = ep->bEndpointAddress;
+                            priv->interface_number = iface->bInterfaceNumber;
+                        } else {
+                            priv->ep_out = ep->bEndpointAddress;
+                            priv->interface_number = iface->bInterfaceNumber;
+                        }
+                    }
+                }
+            }
+        }
+        libusb_free_config_descriptor(conf_desc);
     }
 
-    if (libusb_claim_interface(priv->dev_handle, 0) < 0) {
+    if (priv->interface_number < 0) {
+        priv->interface_number = 0;
+    }
+
+    /* Detach kernel driver on all interfaces if active (e.g. usb_serial_simple) */
+    libusb_set_auto_detach_kernel_driver(priv->dev_handle, 1);
+    for (int iface_idx = 0; iface_idx < 4; iface_idx++) {
+        if (libusb_kernel_driver_active(priv->dev_handle, iface_idx) == 1) {
+            libusb_detach_kernel_driver(priv->dev_handle, iface_idx);
+        }
+    }
+
+    if (libusb_claim_interface(priv->dev_handle, priv->interface_number) < 0) {
+        fprintf(stderr, "[-] Failed to claim interface %d\n", priv->interface_number);
         libusb_close(priv->dev_handle);
         priv->dev_handle = NULL;
         return -1;
     }
 
-    /* Default bulk endpoints for Infineon USB bootloader */
-    priv->ep_out = 0x01; /* EP 1 OUT */
-    priv->ep_in  = 0x82; /* EP 2 IN */
-    priv->interface_number = 0;
+    printf("[*] Claimed interface %d: Bulk OUT = 0x%02X, Bulk IN = 0x%02X\n",
+           priv->interface_number, priv->ep_out, priv->ep_in);
 
     return 0;
 }
@@ -92,6 +141,7 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
     if (r == 0 || r == LIBUSB_ERROR_TIMEOUT) {
         return transferred;
     }
+    fprintf(stderr, "[!] libusb bulk read error on EP 0x%02X: %s\n", priv->ep_in, libusb_error_name(r));
     return -1;
 }
 
@@ -104,6 +154,7 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
     if (r == 0) {
         return transferred;
     }
+    fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
     return -1;
 }
 
