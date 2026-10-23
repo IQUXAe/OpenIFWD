@@ -68,9 +68,10 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
 int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     if (!s || !psi_fls) return -1;
 
-    const fls_chunk_info_t *chunk = fls_find_chunk(psi_fls, FLS_TAG_PSI_RAM);
+    /* Prioritize Tag 12 (IMAGE_DATA) because Tag 11 is only 1.6KB of partition metadata */
+    const fls_chunk_info_t *chunk = fls_find_chunk(psi_fls, FLS_TAG_IMAGE_DATA);
     if (!chunk) {
-        chunk = fls_find_chunk(psi_fls, FLS_TAG_IMAGE_DATA);
+        chunk = fls_find_chunk(psi_fls, FLS_TAG_PSI_RAM);
     }
     if (!chunk) {
         fprintf(stderr, "[-] PSI payload not found in %s\n", psi_fls->filepath);
