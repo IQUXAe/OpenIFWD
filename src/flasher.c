@@ -49,13 +49,29 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
             }
             printf("\n");
 
+            bool has_data = false;
             for (int i = 0; i < n; i++) {
-                /* Target ROM typically answers with Chip ID (e.g. 0x15, 0x16) or 'A', 'T', 0x55, 0x06 */
                 if (rx_buf[i] != 0x00) {
-                    printf("[+] Device synchronized successfully! Received: 0x%02X\n", rx_buf[i]);
-                    transport_flush(s->transport);
-                    return 0;
+                    has_data = true;
+                    break;
                 }
+            }
+
+            if (has_data) {
+                /* Drain remaining identification packet bytes from Boot ROM */
+                uint8_t drain_buf[64];
+                int dn;
+                while ((dn = transport_read(s->transport, drain_buf, sizeof(drain_buf), 100)) > 0) {
+                    printf("[*] Drained %d byte(s) of chip ID data: ", dn);
+                    for (int i = 0; i < dn; i++) {
+                        printf("0x%02X ", drain_buf[i]);
+                    }
+                    printf("\n");
+                }
+
+                printf("[+] Device synchronized successfully!\n");
+                transport_flush(s->transport);
+                return 0;
             }
         }
         usleep(50000);
