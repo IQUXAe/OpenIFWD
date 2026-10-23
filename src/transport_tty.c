@@ -84,7 +84,15 @@ static int tty_open(transport_t *t, const char *device_name, uint32_t baudrate) 
         priv->fd = -1;
     }
 
-    int fd = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    int fd = -1;
+    for (int retry = 0; retry < 300; retry++) {
+        fd = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
+        if (fd >= 0) break;
+        if (retry == 0) {
+            printf("[*] Waiting for %s to become available (connect phone)...\n", device_name);
+        }
+        usleep(100000); /* 100ms */
+    }
     if (fd < 0) {
         return -1;
     }

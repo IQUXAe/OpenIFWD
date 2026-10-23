@@ -145,6 +145,9 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
     if (r == 0 || r == LIBUSB_ERROR_TIMEOUT) {
         return transferred;
     }
+    if (r == LIBUSB_ERROR_PIPE) {
+        libusb_clear_halt(priv->dev_handle, priv->ep_in);
+    }
     fprintf(stderr, "[!] libusb bulk read error on EP 0x%02X: %s\n", priv->ep_in, libusb_error_name(r));
     return -1;
 }
@@ -163,6 +166,9 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         int transferred = 0;
         int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
         if (r != 0) {
+            if (r == LIBUSB_ERROR_PIPE) {
+                libusb_clear_halt(priv->dev_handle, priv->ep_out);
+            }
             fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
             return -1;
         }
@@ -186,7 +192,18 @@ static int usb_set_control(transport_t *t, bool dtr, bool rts) {
 }
 
 static int usb_flush(transport_t *t) {
-    (void)t;
+    usb_priv_t *priv = (usb_priv_t *)t->priv;
+    if (!priv->dev_handle) return -1;
+    if (priv->ep_out) libusb_clear_halt(priv->dev_handle, priv->ep_out);
+    if (priv->ep_in)  libusb_clear_halt(priv->dev_handle, priv->ep_in);
+
+    if (priv->ep_in) {
+        unsigned char dummy[64];
+        int transferred = 0;
+        while (libusb_bulk_transfer(priv->dev_handle, priv->ep_in, dummy, sizeof(dummy), &transferred, 20) == 0 && transferred > 0) {
+            /* drained */
+        }
+    }
     return 0;
 }
 
