@@ -65,9 +65,9 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
         return -1;
     }
 
-    /* Fallback default bulk endpoints */
-    priv->ep_out = 0x01;
-    priv->ep_in  = 0x81;
+    /* Default bulk endpoints */
+    priv->ep_out = 0;
+    priv->ep_in  = 0;
     priv->interface_number = -1;
 
     /* Discover actual bulk endpoints and interface from descriptor */
@@ -80,11 +80,15 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
                     const struct libusb_endpoint_descriptor *ep = &iface->endpoint[e];
                     if ((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK) {
                         if ((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN) {
-                            priv->ep_in = ep->bEndpointAddress;
-                            priv->interface_number = iface->bInterfaceNumber;
+                            if (priv->ep_in == 0) {
+                                priv->ep_in = ep->bEndpointAddress;
+                                priv->interface_number = iface->bInterfaceNumber;
+                            }
                         } else {
-                            priv->ep_out = ep->bEndpointAddress;
-                            priv->interface_number = iface->bInterfaceNumber;
+                            if (priv->ep_out == 0) {
+                                priv->ep_out = ep->bEndpointAddress;
+                                priv->interface_number = iface->bInterfaceNumber;
+                            }
                         }
                     }
                 }
@@ -93,9 +97,9 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
         libusb_free_config_descriptor(conf_desc);
     }
 
-    if (priv->interface_number < 0) {
-        priv->interface_number = 0;
-    }
+    if (priv->ep_out == 0) priv->ep_out = 0x01;
+    if (priv->ep_in == 0)  priv->ep_in  = 0x81;
+    if (priv->interface_number < 0) priv->interface_number = 1;
 
     /* Detach kernel driver on all interfaces if active (e.g. usb_serial_simple) */
     libusb_set_auto_detach_kernel_driver(priv->dev_handle, 1);
@@ -149,13 +153,22 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
     usb_priv_t *priv = (usb_priv_t *)t->priv;
     if (!priv->dev_handle) return -1;
 
-    int transferred = 0;
-    int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)buf, (int)count, &transferred, 3000);
-    if (r == 0) {
-        return transferred;
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t total_written = 0;
+
+    while (total_written < count) {
+        size_t chunk_len = count - total_written;
+        if (chunk_len > 4096) chunk_len = 4096;
+
+        int transferred = 0;
+        int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
+        if (r != 0) {
+            fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
+            return -1;
+        }
+        total_written += (size_t)transferred;
     }
-    fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
-    return -1;
+    return (int)total_written;
 }
 
 static int usb_set_baudrate(transport_t *t, uint32_t baudrate) {
