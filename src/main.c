@@ -119,12 +119,23 @@ int main(int argc, char **argv) {
         }
         fclose(bf);
 
-        transport_t *trans = transport_create_tty();
-        if (!trans || transport_open(trans, port, 115200) != 0) {
-            fprintf(stderr, "[-] Failed to open port %s\n", port);
-            if (trans) transport_destroy(trans);
-            free(bdata);
-            return 1;
+        transport_t *trans = NULL;
+        if (strcmp(port, "usb") == 0) {
+            trans = transport_create_usb();
+            if (!trans || transport_open(trans, NULL, 115200) != 0) {
+                fprintf(stderr, "[-] Failed to open direct USB interface\n");
+                if (trans) transport_destroy(trans);
+                free(bdata);
+                return 1;
+            }
+        } else {
+            trans = transport_create_tty();
+            if (!trans || transport_open(trans, port, 115200) != 0) {
+                fprintf(stderr, "[-] Failed to open port %s\n", port);
+                if (trans) transport_destroy(trans);
+                free(bdata);
+                return 1;
+            }
         }
 
         flasher_config_t cfg;
