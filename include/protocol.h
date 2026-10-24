@@ -10,8 +10,8 @@ extern "C" {
 #endif
 
 /* Standard frame constants */
-#define IFWD_SOT                     0x0200  /* Start of Transmission marker */
-#define IFWD_EOT                     0x0300  /* End of Transmission marker */
+#define IFWD_SOT                     0x0002  /* Wire sequence [0x02, 0x00] in little-endian */
+#define IFWD_EOT                     0x0003  /* Wire sequence [0x03, 0x00] in little-endian */
 #define IFWD_DEFAULT_CHANNEL         1
 
 /* Boot sequence opcodes */
@@ -60,15 +60,16 @@ extern "C" {
 #pragma pack(push, 1)
 
 /* Standard 16-bit packet header (7 bytes) */
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint8_t  channel;
-    uint16_t sot;       /* Big-endian or Little-endian depending on stream: 0x0200 */
+    uint16_t sot;       /* Wire order: [0x02, 0x00] */
     uint16_t msg_type;  /* IFWD_MSG_* */
     uint16_t length;    /* Length of following payload */
 } ifwd_pkt_hdr_t;
+_Static_assert(sizeof(ifwd_pkt_hdr_t) == 7, "ifwd_pkt_hdr_t must be exactly 7 bytes");
 
-/* Set Protocol Configuration Request */
-typedef struct {
+/* Set Protocol Configuration Request (28 bytes) */
+typedef struct __attribute__((packed)) {
     uint32_t boot_mode;
     uint32_t major;
     uint32_t minor;
@@ -86,10 +87,10 @@ typedef struct {
     uint8_t  skip_erase;
     uint8_t  skip_wr_pack_crc;
     uint8_t  boot_cfg_val;
-    uint8_t  reserved;
-    uint16_t expected_memory_class;
-    uint8_t  filler;
+    uint8_t  reserved1;
+    uint8_t  reserved2;
 } ifwd_req_prot_conf_t;
+_Static_assert(sizeof(ifwd_req_prot_conf_t) == 28, "ifwd_req_prot_conf_t must be exactly 28 bytes");
 
 /* Request Flash Set Address */
 typedef struct {

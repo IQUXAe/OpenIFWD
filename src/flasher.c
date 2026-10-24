@@ -474,18 +474,27 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
 
     /* 8. Target signaled EBL execution start (0x17 0xA5) */
     printf("[+] Target signaled EBL execution start (0x17 0xA5)\n");
-    printf("[*] Switching endpoints to EBL configuration (Interface 0: OUT=0x01, IN=0x81)...\n");
+    printf("[*] Settling for 1200ms for EBL C-runtime scatterload and BBM initialization...\n");
+    usleep(1200000); /* 1200ms settling for EBL initialization */
 
-    if (s->config.is_usb) {
-        if (transport_switch_interface(s->transport, 0, 0x01, 0x81) != 0) {
-            fprintf(stderr, "[-] Failed to switch to EBL interface\n");
-            return -1;
+    /* Probe EP 0x83 for EBL greeting / banner / readiness token */
+    uint8_t ebl_banner[256] = {0};
+    int bn = transport_read(s->transport, ebl_banner, sizeof(ebl_banner) - 1, 200);
+    if (bn > 0) {
+        ebl_banner[bn] = '\0';
+        printf("[+] Target EBL message on EP 0x83 (%d bytes): ", bn);
+        for (int i = 0; i < bn; i++) {
+            if (ebl_banner[i] >= 32 && ebl_banner[i] <= 126) {
+                putchar(ebl_banner[i]);
+            } else {
+                printf("[0x%02X]", ebl_banner[i]);
+            }
         }
+        printf("\n");
     }
 
-    usleep(150000); /* 150ms settling for EBL USB endpoint arming */
     transport_flush(s->transport);
-    printf("[+] Target EBL active on EP 0x01/0x81.\n");
+    printf("[+] Target EBL active on Bulk OUT 0x02 / Bulk IN 0x83.\n");
 
     /* Switch baudrate if requested (for UART) */
     if (!s->config.is_usb && s->config.baudrate > 115200) {
@@ -514,13 +523,14 @@ int flasher_configure_protocol(flasher_session_t *s) {
 
     uint8_t tx_buf[256];
     size_t pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_SET_PROT_CONF, &conf, sizeof(conf), tx_buf, sizeof(tx_buf));
+    printf("[*] Sending ReqSetProtConf (%zu bytes to Bulk OUT EP 0x02)...\n", pkt_len);
     if (transport_write(s->transport, tx_buf, pkt_len) != (int)pkt_len) {
         fprintf(stderr, "[-] Failed to write ReqSetProtConf packet\n");
         return -1;
     }
 
     uint8_t rx_buf[256];
-    int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 2000);
+    int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 3000);
     if (n > 0) {
         printf("[+] Protocol configuration acknowledged (%d bytes): ", n);
         for (int i = 0; i < n && i < 16; i++) printf("0x%02X ", rx_buf[i]);
