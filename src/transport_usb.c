@@ -164,10 +164,6 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
     /* 2. Buffer is empty, perform a bulk transfer into rx_buf */
     int transferred = 0;
     int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_in, priv->rx_buf, sizeof(priv->rx_buf), &transferred, timeout_ms);
-    if (r == LIBUSB_ERROR_PIPE) {
-        libusb_clear_halt(priv->dev_handle, priv->ep_in);
-        r = libusb_bulk_transfer(priv->dev_handle, priv->ep_in, priv->rx_buf, sizeof(priv->rx_buf), &transferred, timeout_ms);
-    }
 
     if (r == 0 && transferred > 0) {
         priv->rx_head = 0;
@@ -204,14 +200,8 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         int transferred = 0;
         int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
         if (r != 0) {
-            if (r == LIBUSB_ERROR_PIPE || r == LIBUSB_ERROR_TIMEOUT) {
-                libusb_clear_halt(priv->dev_handle, priv->ep_out);
-                r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
-            }
-            if (r != 0) {
-                fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
-                return -1;
-            }
+            fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
+            return -1;
         }
         total_written += (size_t)transferred;
     }
@@ -239,7 +229,7 @@ static int usb_flush(transport_t *t) {
     priv->rx_head = 0;
     priv->rx_tail = 0;
 
-    /* Drain any pending bytes on Bulk IN without resetting endpoint halt/data toggles */
+    /* Drain any pending bytes on Bulk IN without touching EP 0x00 */
     if (priv->ep_in) {
         unsigned char dummy[512];
         int transferred = 0;
@@ -251,36 +241,8 @@ static int usb_flush(transport_t *t) {
 }
 
 static int usb_reclaim(transport_t *t) {
-    usb_priv_t *priv = (usb_priv_t *)t->priv;
-    if (!priv->dev_handle) return -1;
-
-    priv->rx_head = 0;
-    priv->rx_tail = 0;
-
-    /* Release and re-claim interface to reset host xHCI endpoint rings and Data Toggles */
-    libusb_release_interface(priv->dev_handle, priv->interface_number);
-    usleep(50000); /* 50ms settling */
-    int r = libusb_claim_interface(priv->dev_handle, priv->interface_number);
-    if (r < 0) {
-        fprintf(stderr, "[-] Failed to re-claim interface %d: %s\n",
-                priv->interface_number, libusb_error_name(r));
-        return -1;
-    }
-
-    /* Reset endpoint halt condition and reset hardware data toggle sequence to DATA0 */
-    libusb_clear_halt(priv->dev_handle, priv->ep_out);
-    libusb_clear_halt(priv->dev_handle, priv->ep_in);
-
-    /* Drain any stale packets */
-    if (priv->ep_in) {
-        unsigned char dummy[512];
-        int transferred = 0;
-        while (libusb_bulk_transfer(priv->dev_handle, priv->ep_in, dummy, sizeof(dummy), &transferred, 20) == 0 && transferred > 0) {
-            /* drained */
-        }
-    }
-
-    return 0;
+    /* Do not send EP 0x00 control transfers (clear_halt) which freeze on minimal BROM/EBL EP0 */
+    return usb_flush(t);
 }
 
 static void usb_destroy(transport_t *t) {

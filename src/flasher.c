@@ -474,25 +474,9 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
 
     /* 8. Target signaled EBL execution start (0x17 0xA5) */
     printf("[+] Target signaled EBL execution start (0x17 0xA5)\n");
-    printf("[*] Waiting 500ms for EBL hardware initialization and BBM mount...\n");
-    usleep(500000);
-
-    /* Synchronize USB interface and reset Data Toggles with EBL */
-    if (s->config.is_usb) {
-        printf("[*] Cycling USB interface to synchronize Data Toggles with EBL...\n");
-        if (transport_reclaim(s->transport) != 0) {
-            printf("[*] Performing full USB reconnect...\n");
-            transport_close(s->transport);
-            usleep(100000);
-            if (transport_open(s->transport, NULL, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to re-open USB interface for EBL\n");
-                return -1;
-            }
-        }
-    } else {
-        transport_flush(s->transport);
-    }
-
+    printf("[*] Waiting 200ms for EBL startup...\n");
+    usleep(200000);
+    transport_flush(s->transport);
     printf("[+] Target EBL active.\n");
 
     /* Switch baudrate if requested (for UART) */
