@@ -474,26 +474,6 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
 
     /* 8. Target signaled EBL execution start (0x17 0xA5) */
     printf("[+] Target signaled EBL execution start (0x17 0xA5)\n");
-    printf("[*] Settling for 1200ms for EBL C-runtime scatterload and BBM initialization...\n");
-    usleep(1200000); /* 1200ms settling for EBL initialization */
-
-    /* Probe EP 0x83 for EBL greeting / banner / readiness token */
-    uint8_t ebl_banner[256] = {0};
-    int bn = transport_read(s->transport, ebl_banner, sizeof(ebl_banner) - 1, 200);
-    if (bn > 0) {
-        ebl_banner[bn] = '\0';
-        printf("[+] Target EBL message on EP 0x83 (%d bytes): ", bn);
-        for (int i = 0; i < bn; i++) {
-            if (ebl_banner[i] >= 32 && ebl_banner[i] <= 126) {
-                putchar(ebl_banner[i]);
-            } else {
-                printf("[0x%02X]", ebl_banner[i]);
-            }
-        }
-        printf("\n");
-    }
-
-    transport_flush(s->transport);
     printf("[+] Target EBL active on Bulk OUT 0x02 / Bulk IN 0x83.\n");
 
     /* Switch baudrate if requested (for UART) */
@@ -511,34 +491,140 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
 }
 
 int flasher_configure_protocol(flasher_session_t *s) {
-    printf("[*] Configuring transfer protocol (ReqSetProtConf)...\n");
+    if (!s) return -1;
 
-    ifwd_req_prot_conf_t conf;
-    memset(&conf, 0, sizeof(conf));
-    conf.boot_mode = 0;
-    conf.major = 4;
-    conf.minor = 68;
-    conf.package_size = 8;
-    conf.crc_type = 0; /* XOR 16-bit */
+    printf("[*] Configuring transfer protocol (EBL Handshake & ReqSetProtConf)...\n");
 
-    uint8_t tx_buf[256];
-    size_t pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_SET_PROT_CONF, &conf, sizeof(conf), tx_buf, sizeof(tx_buf));
-    printf("[*] Sending ReqSetProtConf (%zu bytes to Bulk OUT EP 0x02)...\n", pkt_len);
-    if (transport_write(s->transport, tx_buf, pkt_len) != (int)pkt_len) {
-        fprintf(stderr, "[-] Failed to write ReqSetProtConf packet\n");
-        return -1;
-    }
+    if (s->config.is_usb) {
+        /* Step 1: Drain Device Announcement (Frame 128)
+         * EBL C-runtime initializes hardware and autonomously primes EP 0x83
+         * with a 76-byte identification packet. We wait ~1000ms for EBL boot.
+         */
+        printf("[*] Waiting 1000ms for EBL runtime initialization...\n");
+        usleep(1000000);
 
-    uint8_t rx_buf[256];
-    int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 3000);
-    if (n > 0) {
-        printf("[+] Protocol configuration acknowledged (%d bytes): ", n);
-        for (int i = 0; i < n && i < 16; i++) printf("0x%02X ", rx_buf[i]);
-        printf("\n");
+        ebl_target_announce_t announce;
+        memset(&announce, 0, sizeof(announce));
+        size_t ann_recvd = 0;
+        uint8_t *ann_p = (uint8_t *)&announce;
+
+        while (ann_recvd < sizeof(announce)) {
+            int br = transport_read(s->transport, ann_p + ann_recvd, sizeof(announce) - ann_recvd, 5000);
+            if (br <= 0) break;
+            ann_recvd += br;
+        }
+
+        if (ann_recvd != sizeof(announce)) {
+            fprintf(stderr, "[-] Failed to read EBL announcement from EP 0x83 (received %zu / %zu bytes)\n",
+                    ann_recvd, sizeof(announce));
+            return -1;
+        }
+
+        printf("[+] Received EBL target announcement (%zu bytes):\n", ann_recvd);
+        printf("    Magic:        0x%08X\n", announce.magic);
+        printf("    Proto ver:    %u\n", announce.proto_ver);
+        printf("    Channel:      %u\n", announce.channel);
+        printf("    Chip ID:      %.32s\n", announce.chip_id);
+        printf("    Capabilities: ");
+        for (int i = 0; i < 16; i++) printf("%02X ", announce.capabilities[i]);
+        printf("...\n");
+
+        /* Step 2: Send ReqSetProtConf (Frame 129)
+         * Send 2056 bytes to Bulk OUT EP 0x02:
+         * 8-byte ebl_pkt_hdr_t + 72-byte ebl_req_prot_conf_t + 1976 zeroes
+         */
+        uint8_t tx_buf[2056];
+        memset(tx_buf, 0, sizeof(tx_buf));
+
+        ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_buf;
+        hdr->token = 0x0576;
+        hdr->msg_type = IFWD_MSG_REQ_SET_PROT_CONF; /* 0x0086 */
+        hdr->length = sizeof(ebl_req_prot_conf_t);   /* 72 bytes */
+
+        ebl_req_prot_conf_t *req = (ebl_req_prot_conf_t *)(tx_buf + sizeof(ebl_pkt_hdr_t));
+        req->magic = announce.magic;
+        req->proto_ver = announce.proto_ver;
+        req->channel = announce.channel;
+        memcpy(req->chip_id, announce.chip_id, sizeof(req->chip_id));
+        memcpy(req->flags, announce.capabilities, sizeof(req->flags));
+        req->flags[10] = 0x00;
+        req->flags[11] = 0x00;
+
+        printf("[*] Sending ReqSetProtConf (%zu bytes to Bulk OUT EP 0x02)...\n", sizeof(tx_buf));
+        if (transport_write(s->transport, tx_buf, sizeof(tx_buf)) != (int)sizeof(tx_buf)) {
+            fprintf(stderr, "[-] Failed to write ReqSetProtConf (2056 bytes)\n");
+            return -1;
+        }
+
+        /* Step 3: Receive RspSetProtConf (Frame 130)
+         * Read 8-byte ebl_rsp_prot_conf_t from Bulk IN EP 0x83
+         */
+        ebl_rsp_prot_conf_t rsp;
+        memset(&rsp, 0, sizeof(rsp));
+        size_t rsp_recvd = 0;
+        uint8_t *rsp_p = (uint8_t *)&rsp;
+
+        while (rsp_recvd < sizeof(rsp)) {
+            int br = transport_read(s->transport, rsp_p + rsp_recvd, sizeof(rsp) - rsp_recvd, 5000);
+            if (br <= 0) break;
+            rsp_recvd += br;
+        }
+
+        if (rsp_recvd != sizeof(rsp)) {
+            fprintf(stderr, "[-] Timeout waiting for RspSetProtConf (received %zu / %zu bytes)\n",
+                    rsp_recvd, sizeof(rsp));
+            return -1;
+        }
+
+        printf("[+] Protocol configuration acknowledged (msg: 0x%04X, ack: 0x%04X, status: 0x%08X)\n",
+               rsp.msg_type, rsp.ack_type, rsp.status_len);
+
+        if (rsp.msg_type != 0x0089 || rsp.ack_type != IFWD_MSG_REQ_SET_PROT_CONF) {
+            fprintf(stderr, "[-] Unexpected RspSetProtConf response (0x%04X / 0x%04X)\n",
+                    rsp.msg_type, rsp.ack_type);
+            return -1;
+        }
+
+        /* Step 4: Drain Device Capabilities Buffer (Frame 131)
+         * Target returns 2048 bytes on Bulk IN EP 0x83
+         */
+        uint8_t cap_buf[2048];
+        size_t cap_recvd = 0;
+        while (cap_recvd < sizeof(cap_buf)) {
+            int br = transport_read(s->transport, cap_buf + cap_recvd, sizeof(cap_buf) - cap_recvd, 5000);
+            if (br <= 0) break;
+            cap_recvd += br;
+        }
+        printf("[+] Drained EBL capabilities buffer (%zu bytes from Bulk IN EP 0x83).\n", cap_recvd);
+        printf("[+] EBL protocol layer synchronized successfully!\n");
+        return 0;
+    } else {
+        /* Fallback for legacy UART framing */
+        ifwd_req_prot_conf_t conf;
+        memset(&conf, 0, sizeof(conf));
+        conf.boot_mode = 0;
+        conf.major = 4;
+        conf.minor = 68;
+        conf.package_size = 8;
+        conf.crc_type = 0; /* XOR 16-bit */
+
+        uint8_t tx_buf[256];
+        size_t pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_SET_PROT_CONF, &conf, sizeof(conf), tx_buf, sizeof(tx_buf));
+        printf("[*] Sending UART ReqSetProtConf (%zu bytes)...\n", pkt_len);
+        if (transport_write(s->transport, tx_buf, pkt_len) != (int)pkt_len) {
+            fprintf(stderr, "[-] Failed to write ReqSetProtConf packet\n");
+            return -1;
+        }
+
+        uint8_t rx_buf[256];
+        int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 3000);
+        if (n > 0) {
+            printf("[+] UART Protocol configuration acknowledged (%d bytes)\n", n);
+            return 0;
+        }
+        printf("[*] Proceeding with default protocol configuration\n");
         return 0;
     }
-    printf("[*] Proceeding with default protocol configuration\n");
-    return 0;
 }
 
 int flasher_query_flash_id(flasher_session_t *s) {

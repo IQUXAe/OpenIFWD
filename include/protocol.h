@@ -92,15 +92,51 @@ typedef struct __attribute__((packed)) {
 } ifwd_req_prot_conf_t;
 _Static_assert(sizeof(ifwd_req_prot_conf_t) == 28, "ifwd_req_prot_conf_t must be exactly 28 bytes");
 
+/* EBL 8-byte Packet Header (V3/V4 framing) */
+typedef struct __attribute__((packed)) {
+    uint16_t token;      /* e.g. 0x0576 for ReqSetProtConf */
+    uint16_t msg_type;   /* e.g. 0x0086 (ReqSetProtConf) */
+    uint32_t length;     /* 0x00000048 (72 bytes body length) */
+} ebl_pkt_hdr_t;
+_Static_assert(sizeof(ebl_pkt_hdr_t) == 8, "ebl_pkt_hdr_t must be 8 bytes");
+
+/* EBL 76-byte Target Identification / Announcement (Frame 128) */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;      /* 0x000000BB */
+    uint32_t proto_ver;  /* 0x00000003 */
+    uint32_t channel;    /* 0x00000001 */
+    char     chip_id[32];/* "2150_OD_KL1_3.1" (null-padded) */
+    uint8_t  capabilities[32]; /* 32 bytes capability flags */
+} ebl_target_announce_t;
+_Static_assert(sizeof(ebl_target_announce_t) == 76, "ebl_target_announce_t must be 76 bytes");
+
+/* EBL 72-byte ReqSetProtConf Payload (Frame 129) */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;      /* 0x000000BB */
+    uint32_t proto_ver;  /* 0x00000003 */
+    uint32_t channel;    /* 0x00000001 */
+    char     chip_id[32];/* "2150_OD_KL1_3.1" */
+    uint8_t  flags[28];  /* 28 bytes configuration flags */
+} ebl_req_prot_conf_t;
+_Static_assert(sizeof(ebl_req_prot_conf_t) == 72, "ebl_req_prot_conf_t must be 72 bytes");
+
+/* EBL 8-byte RspSetProtConf Status (Frame 130) */
+typedef struct __attribute__((packed)) {
+    uint16_t msg_type;   /* 0x0089 (RspSetProtConf) */
+    uint16_t ack_type;   /* 0x0086 (Ack for ReqSetProtConf) */
+    uint32_t status_len; /* 0x00000002 */
+} ebl_rsp_prot_conf_t;
+_Static_assert(sizeof(ebl_rsp_prot_conf_t) == 8, "ebl_rsp_prot_conf_t must be 8 bytes");
+
 /* Request Flash Set Address */
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t address;
     uint16_t checksum;
     uint16_t end;
 } ifwd_req_set_address_t;
 
 /* Request Flash Erase Start */
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t start_addr;
     uint32_t end_addr;
     uint16_t checksum;
@@ -108,7 +144,7 @@ typedef struct {
 } ifwd_req_erase_start_t;
 
 /* Erase Check Response */
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint8_t  status;
     uint32_t erase_addr;
 } ifwd_rsp_erase_check_t;
