@@ -20,6 +20,7 @@ typedef struct {
     int (*set_control)(transport_t *t, bool dtr, bool rts);
     int (*flush)(transport_t *t);
     int (*reclaim)(transport_t *t);
+    int (*switch_interface)(transport_t *t, int iface, uint8_t ep_out, uint8_t ep_in);
     void (*destroy)(transport_t *t);
 } transport_ops_t;
 
@@ -63,6 +64,10 @@ static inline int transport_flush(transport_t *t) {
 
 static inline int transport_reclaim(transport_t *t) {
     return t && t->ops && t->ops->reclaim ? t->ops->reclaim(t) : 0;
+}
+
+static inline int transport_switch_interface(transport_t *t, int iface, uint8_t ep_out, uint8_t ep_in) {
+    return t && t->ops && t->ops->switch_interface ? t->ops->switch_interface(t, iface, ep_out, ep_in) : 0;
 }
 
 static inline void transport_destroy(transport_t *t) {

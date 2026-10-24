@@ -226,6 +226,7 @@ static const transport_ops_t tty_ops = {
     .set_control = tty_set_control,
     .flush = tty_flush,
     .reclaim = tty_flush,
+    .switch_interface = NULL,
     .destroy = tty_destroy
 };
 

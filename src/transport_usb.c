@@ -242,28 +242,36 @@ static int usb_flush(transport_t *t) {
 }
 
 static int usb_reclaim(transport_t *t) {
-    usb_priv_t *priv = (usb_priv_t *)t->priv;
-    if (!priv->dev_handle) return -1;
+    return usb_flush(t);
+}
 
-    printf("[*] Performing USB bus reset (SE0) to trigger EBL enumeration...\n");
-    int r = libusb_reset_device(priv->dev_handle);
-    if (r != 0) {
-        printf("[*] Bus reset notification: %s (initiating re-enumeration)\n", libusb_error_name(r));
+static int usb_switch_interface(transport_t *t, int new_interface, uint8_t new_ep_out, uint8_t new_ep_in) {
+    usb_priv_t *priv = (usb_priv_t *)t->priv;
+    if (!priv || !priv->dev_handle) return -1;
+
+    priv->rx_head = 0;
+    priv->rx_tail = 0;
+
+    if (priv->interface_number >= 0 && priv->interface_number != new_interface) {
+        printf("[*] Releasing Interface %d...\n", priv->interface_number);
+        libusb_release_interface(priv->dev_handle, priv->interface_number);
     }
 
-    /* Release old interface and close old handle */
-    usb_close(t);
+    if (libusb_kernel_driver_active(priv->dev_handle, new_interface) == 1) {
+        libusb_detach_kernel_driver(priv->dev_handle, new_interface);
+    }
 
-    /* Settling delay for Linux kernel xHCI and EBL to re-enumerate and configure endpoints */
-    printf("[*] Waiting for USB re-enumeration...\n");
-    usleep(600000); /* 600ms */
-
-    /* Re-open USB device with fresh enumeration and claimed interface */
-    if (usb_open(t, NULL, 115200) != 0) {
-        fprintf(stderr, "[-] Failed to re-open USB device after bus reset\n");
+    printf("[*] Claiming Interface %d for EBL (Bulk OUT = 0x%02X, Bulk IN = 0x%02X)...\n",
+           new_interface, new_ep_out, new_ep_in);
+    int r = libusb_claim_interface(priv->dev_handle, new_interface);
+    if (r < 0) {
+        fprintf(stderr, "[-] Failed to claim interface %d: %s\n", new_interface, libusb_error_name(r));
         return -1;
     }
 
+    priv->interface_number = new_interface;
+    priv->ep_out = new_ep_out;
+    priv->ep_in  = new_ep_in;
     return 0;
 }
 
@@ -283,6 +291,7 @@ static const transport_ops_t usb_ops = {
     .set_control = usb_set_control,
     .flush = usb_flush,
     .reclaim = usb_reclaim,
+    .switch_interface = usb_switch_interface,
     .destroy = usb_destroy
 };
 
