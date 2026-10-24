@@ -10,18 +10,20 @@
 
 const char *fls_tag_name(uint32_t tag) {
     switch (tag) {
-        case FLS_TAG_FILE_HDR:     return "FILE_HDR (Meta / Signature)";
-        case FLS_TAG_PLATFORM_CFG: return "PLATFORM_CFG (Platform Config)";
-        case FLS_TAG_PSI_RAM:      return "PSI_RAM (Primary Stage Initializer)";
-        case FLS_TAG_IMAGE_DATA:   return "IMAGE_DATA (Flash Binary Image)";
-        case FLS_TAG_EBL_RAM:      return "EBL_RAM (Embedded Bootloader)";
-        case FLS_TAG_SEC_CFG:      return "SEC_CFG (Security Config)";
-        case FLS_TAG_TOC:          return "TOC (Table of Contents)";
-        case FLS_TAG_ADDR_MAP:     return "ADDR_MAP (Memory Map / Partition)";
-        case FLS_TAG_NVM:          return "NVM (Non-Volatile Memory)";
-        case FLS_TAG_XML_DATA:     return "XML_DATA (Injected XML Config)";
-        case FLS_TAG_CERTIFICATE:  return "CERTIFICATE (Security Cert)";
-        default:                   return "UNKNOWN";
+        case FLS_TAG_FILE_HDR:         return "FILE_HDR (Meta / Signature)";
+        case FLS_TAG_PLATFORM_CFG:     return "PLATFORM_CFG (Platform Config)";
+        case FLS_TAG_PARTITION_TABLE:  return "PARTITION_TABLE (Flash / RAM Partitions)";
+        case FLS_TAG_IMAGE_DATA:       return "IMAGE_DATA (Flash Binary Image)";
+        case FLS_TAG_PLATFORM_EXT:     return "PLATFORM_EXT (Platform Ext Parameters)";
+        case FLS_TAG_EBL_RAM:          return "EBL_RAM (Embedded Bootloader)";
+        case FLS_TAG_SEC_CFG:          return "SEC_CFG (Security Config)";
+        case FLS_TAG_TOC:              return "TOC (Table of Contents)";
+        case FLS_TAG_ADDR_MAP:         return "ADDR_MAP (Memory Map / Partition)";
+        case FLS_TAG_RPSI:             return "RPSI (Primary Stage Initializer Code)";
+        case FLS_TAG_SECONDARY_LOADER: return "SECONDARY_LOADER (Secondary Stage Loader)";
+        case FLS_TAG_XML_DATA:         return "XML_DATA (Injected XML Config)";
+        case FLS_TAG_CERTIFICATE:      return "CERTIFICATE (Security Cert)";
+        default:                       return "UNKNOWN";
     }
 }
 
@@ -188,8 +190,6 @@ void fls_print_info(const fls_file_t *fls) {
             printf("    Tag ID:     %u\n", entry->tag_id);
             printf("    Mem Class:  0x%08x\n", entry->mem_class);
             printf("    Load Addr:  0x%08x\n", entry->load_address);
-            printf("    Length:     0x%08x (%u bytes)\n", entry->length, entry->length);
-            printf("    Checksum:   0x%08x\n", entry->checksum);
         }
     }
     printf("================================================================================\n");

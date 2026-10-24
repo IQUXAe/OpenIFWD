@@ -10,17 +10,21 @@ extern "C" {
 #endif
 
 /* Known FLS chunk tags */
-#define FLS_TAG_FILE_HDR      1000  /* File metadata / signature */
-#define FLS_TAG_PLATFORM_CFG  3     /* Platform config */
-#define FLS_TAG_PSI_RAM       11    /* Primary Stage Initializer (RAM) */
-#define FLS_TAG_IMAGE_DATA    12    /* Main Firmware / Flash Image */
-#define FLS_TAG_EBL_RAM       14    /* Embedded Boot Loader (RAM) */
-#define FLS_TAG_SEC_CFG       15    /* Security configuration */
-#define FLS_TAG_TOC           16    /* Table of Contents */
-#define FLS_TAG_ADDR_MAP      17    /* Address mapping / partition */
-#define FLS_TAG_NVM           18    /* NVM data */
-#define FLS_TAG_XML_DATA      21    /* Injected XML configuration */
-#define FLS_TAG_CERTIFICATE   31    /* Security certificates */
+#define FLS_TAG_FILE_HDR          1000  /* File metadata / signature */
+#define FLS_TAG_PLATFORM_CFG      3     /* Platform config */
+#define FLS_TAG_PARTITION_TABLE   11    /* Flash / RAM partition definitions (1628 bytes) */
+#define FLS_TAG_PSI_RAM           11    /* Backward-compatible alias */
+#define FLS_TAG_IMAGE_DATA        12    /* Main Firmware / Flash Image */
+#define FLS_TAG_PLATFORM_EXT      13    /* Platform extended parameters (172 bytes) */
+#define FLS_TAG_EBL_RAM           14    /* Embedded Boot Loader (RAM) */
+#define FLS_TAG_SEC_CFG           15    /* Security configuration */
+#define FLS_TAG_TOC               16    /* Table of Contents */
+#define FLS_TAG_ADDR_MAP          17    /* Address mapping / partition */
+#define FLS_TAG_RPSI              18    /* Primary Stage Initializer / Bootloader executable (RAM) */
+#define FLS_TAG_NVM               18    /* Backward-compatible alias */
+#define FLS_TAG_SECONDARY_LOADER  19    /* Secondary Loader / EBL payload */
+#define FLS_TAG_XML_DATA          21    /* Injected XML configuration */
+#define FLS_TAG_CERTIFICATE       31    /* Security certificates */
 
 #pragma pack(push, 1)
 
@@ -31,22 +35,20 @@ typedef struct {
     uint32_t flags;
 } fls_chunk_hdr_t;
 
-/* TOC header preceding the TOC entries in Tag 16 */
+/* TOC header preceding the TOC entries in Tag 16 (12 bytes) */
 typedef struct {
     uint32_t num_items;
-    uint32_t reserved1;
-    uint32_t reserved2;
+    uint32_t reserved;
+    uint32_t entries_offset;
 } fls_toc_hdr_t;
 
 /* Each TOC entry in Tag 16 is 144 bytes (0x90) */
 typedef struct {
-    uint32_t tag_id;          /* Associated chunk tag (e.g. 12) */
-    uint32_t mem_class;       /* Memory class */
-    uint32_t flash_tech;      /* Flash technology */
+    uint32_t tag_id;          /* Associated chunk tag or 0 */
+    uint32_t mem_class;       /* Memory class: 1=PSI, 2=SLB/EBL, 4=CODE/Flash */
     uint32_t load_address;    /* Target flash load address */
-    uint32_t length;          /* Payload length */
-    uint32_t checksum;        /* 16/32-bit checksum */
-    char     filename[120];   /* Name or relative path of component */
+    uint32_t reserved;        /* Reserved / padding */
+    char     filename[128];   /* Name or relative path of component */
 } fls_toc_entry_t;
 
 #pragma pack(pop)
