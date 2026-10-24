@@ -264,21 +264,26 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         return -1;
     }
 
-    /* 4. Wait for Target Boot ROM ACK (expected: 0x01, or 0x0B, 0xB1, 0xC1) */
+    /* 4. Wait for Target Boot ROM ACK (XMM2150 sends 2 bytes: [0x01, 0x01]) */
     uint8_t ack_buf[4] = {0};
-    int r = transport_read(s->transport, ack_buf, 1, 5000);
-    if (r > 0) {
-        printf("[+] PSI acknowledged by Boot ROM (%d byte(s), Ack: 0x%02X)\n", r, ack_buf[0]);
-        if (ack_buf[0] == 0x01 || ack_buf[0] == 0x0B || ack_buf[0] == 0xB1 || ack_buf[0] == 0xC1) {
-            printf("[+] PSI successfully executed by Boot ROM!\n");
-        } else {
-            fprintf(stderr, "[-] Unexpected Boot ROM ACK byte: 0x%02X\n", ack_buf[0]);
-            return -1;
-        }
+    int r = 0;
+    while (r < 2) {
+        int br = transport_read(s->transport, ack_buf + r, 2 - r, 3000);
+        if (br <= 0) break;
+        r += br;
+    }
+    if (r > 0 && (ack_buf[0] == 0x01 || ack_buf[0] == 0x0B || ack_buf[0] == 0xB1 || ack_buf[0] == 0xC1)) {
+        printf("[+] PSI acknowledged by Boot ROM (%d byte(s): 0x%02X", r, ack_buf[0]);
+        if (r > 1) printf(" 0x%02X", ack_buf[1]);
+        printf(")\n");
+        printf("[+] PSI successfully executed by Boot ROM!\n");
     } else {
-        fprintf(stderr, "[-] No ACK received from Boot ROM within 5s\n");
+        fprintf(stderr, "[-] Unexpected Boot ROM ACK (%d bytes, 0x%02X)\n", r, ack_buf[0]);
         return -1;
     }
+
+    /* Drain any leftover bytes and flush transport buffers */
+    transport_flush(s->transport);
 
     /* For X-Gold 215 / PMB8815 (Chip ID 0x17):
      * Boot ROM executed the 6,296-byte embedded PSI into internal SRAM at 0x80000.
@@ -287,27 +292,49 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
      * uploaded to SRAM at 0x82000 to initialize Mobile DDR SDRAM!
      */
     if (s->chip_id == 0x17 && psi_fls) {
-        /* 1. Settling delay (30ms) for ARM9 to boot embedded PSI and populate EP 0x83 FIFO.
+        /* 1. Settling delay (50ms) for ARM9 to boot embedded PSI and populate EP 0x83 FIFO.
          * NOTE: DO NOT call transport_reclaim, libusb_release_interface, or libusb_clear_halt!
          * Any EP0 Control transfer causes ARM9 Data Abort in this stage!
          */
-        usleep(30000);
+        usleep(50000);
 
-        /* 2. Optional readiness token check:
-         * In UART mode, embedded PSI transmits [0x00, 0xAA] to sync baudrate.
-         * In USB Full-Speed mode, the SoC enters rx loop at 0x80240 immediately waiting for 4-byte length.
-         * We do a quick non-blocking check (50ms); if not received, we send length directly.
+        /* 2. Wait for Boot ROM PSI readiness handshake token:
+         * Embedded PSI in SRAM at 0x00080044 initializes hardware and transmits
+         * 2-byte token [0x00, 0xAA] on EP 0x83 (instruction at 0x80228: blx r3),
+         * then loops at 0x80230 waiting for the host to read it before enabling EP 0x02 RX!
          */
-        uint8_t rpsi_tok[4] = {0};
-        int tok_ret = transport_read(s->transport, rpsi_tok, 2, 50);
-        if (tok_ret == 2 && rpsi_tok[0] == 0x00 && rpsi_tok[1] == 0xAA) {
-            printf("[+] Target signaled readiness for RPSI (token: 0x%02X 0x%02X)\n",
-                   rpsi_tok[0], rpsi_tok[1]);
-        } else if (tok_ret > 0) {
-            printf("[*] Target sent %d preliminary byte(s): 0x%02X\n", tok_ret, rpsi_tok[0]);
-        } else {
-            printf("[*] USB mode: skipping optional token, sending RPSI length header directly...\n");
+        printf("[*] Waiting for PSI DDR/PLL initialization (expecting [0x00, 0xAA])...\n");
+        uint8_t rpsi_tok[8] = {0};
+        int rpsi_tn = 0;
+        time_t tok_start = time(NULL);
+        bool tok_found = false;
+
+        while (time(NULL) - tok_start < 3) {
+            int br = transport_read(s->transport, rpsi_tok + rpsi_tn, sizeof(rpsi_tok) - rpsi_tn, 200);
+            if (br > 0) {
+                rpsi_tn += br;
+                for (int i = 0; i + 1 < rpsi_tn; i++) {
+                    if (rpsi_tok[i] == 0x00 && rpsi_tok[i+1] == 0xAA) {
+                        tok_found = true;
+                        break;
+                    }
+                }
+                if (tok_found) break;
+            }
         }
+
+        if (tok_found) {
+            printf("[+] PSI DDR/PLL initialized! Got readiness token: [0x00, 0xAA]\n");
+        } else if (rpsi_tn > 0) {
+            printf("[*] Target sent %d byte(s) during token wait: ", rpsi_tn);
+            for (int i = 0; i < rpsi_tn; i++) printf("0x%02X ", rpsi_tok[i]);
+            printf("\n");
+        } else {
+            printf("[*] Token wait timeout, proceeding with RPSI length header...\n");
+        }
+
+        /* Settling delay before sending length */
+        usleep(15000);
 
         /* 3. Extract RPSI (Tag 18) from psi_fls */
         const fls_chunk_info_t *rpsi_chunk = fls_find_chunk(psi_fls, FLS_TAG_RPSI);
