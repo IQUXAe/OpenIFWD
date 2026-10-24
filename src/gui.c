@@ -185,8 +185,10 @@ static void *worker_flash_thread(void *arg) {
     gui_log_async("[*] Starting flashing session on port: %s\n", port ? port : "unknown");
     gui_set_progress_async(0.05, "Connecting...");
 
+    cfg->is_usb = (port && (strstr(port, "usb") != NULL || strstr(port, "USB") != NULL));
+
     transport_t *trans = NULL;
-    if (port && strcmp(port, "usb (direct libusb)") == 0) {
+    if (cfg->is_usb) {
         trans = transport_create_usb();
         if (!trans || transport_open(trans, NULL, cfg->baudrate) != 0) {
             gui_log_async("[-] Failed to open direct USB interface\n");

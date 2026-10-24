@@ -237,10 +237,7 @@ static int usb_flush(transport_t *t) {
     priv->rx_head = 0;
     priv->rx_tail = 0;
 
-    if (priv->ep_out) libusb_clear_halt(priv->dev_handle, priv->ep_out);
-    if (priv->ep_in)  libusb_clear_halt(priv->dev_handle, priv->ep_in);
-
-    /* Drain any pending bytes on Bulk IN */
+    /* Drain any pending bytes on Bulk IN without resetting endpoint halt/data toggles */
     if (priv->ep_in) {
         unsigned char dummy[512];
         int transferred = 0;

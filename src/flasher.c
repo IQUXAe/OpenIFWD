@@ -29,18 +29,27 @@ void flasher_destroy(flasher_session_t *session) {
 }
 
 int flasher_sync(flasher_session_t *s, int timeout_sec) {
-    printf("[*] Starting handshake with device (sending ATAT sync)...\n");
-    printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
+    if (!s) return -1;
+    bool is_usb = s->config.is_usb;
+
+    if (!is_usb) {
+        printf("[*] Starting UART handshake (sending ATAT sync)...\n");
+        printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
+        /* Set DTR/RTS once before sync loop */
+        transport_set_control(s->transport, true, true);
+    } else {
+        printf("[*] USB mode: waiting for device Boot ROM banner (no ATAT sync)...\n");
+        printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
+    }
 
     time_t start = time(NULL);
     uint8_t at_cmd[] = "ATAT\r\n";
     uint8_t rx_buf[64];
 
-    /* Set DTR/RTS once before sync loop */
-    transport_set_control(s->transport, true, true);
-
     while (time(NULL) - start < timeout_sec) {
-        transport_write(s->transport, at_cmd, 4);
+        if (!is_usb) {
+            transport_write(s->transport, at_cmd, 4);
+        }
 
         int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 200);
         if (n > 0) {
