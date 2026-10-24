@@ -730,52 +730,146 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
 
     printf("[*] Preparing RAM execution at 0x%08X (%zu bytes)...\n", ram_addr, size);
 
-    /* 1. Set RAM Work Address (ReqSetRamWorkAddress = 0x201) */
-    uint8_t pkt_buf[CHUNK_WRITE_SIZE + 64];
-    uint8_t rx_buf[64];
-    uint32_t addr_val = ram_addr;
-    size_t pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_SET_RAM_ADDR, &addr_val, sizeof(addr_val), pkt_buf, sizeof(pkt_buf));
-    if (transport_write(s->transport, pkt_buf, pkt_len) != (int)pkt_len) {
-        fprintf(stderr, "[-] Failed to write ReqSetRamWorkAddress packet\n");
-        return -1;
-    }
-    int rn = transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
-    if (rn > 0) {
-        printf("[+] RAM work address acknowledged (%d bytes)\n", rn);
-    }
-    usleep(10000);
+    if (s->config.is_usb) {
+        /* USB V3/V4 Ping-Pong Framing */
 
-    /* 2. Write data to RAM in chunks (ReqWriteToRam = 0x202) */
-    size_t bytes_written = 0;
-    while (bytes_written < size) {
-        size_t chunk_len = size - bytes_written;
-        if (chunk_len > CHUNK_WRITE_SIZE) chunk_len = CHUNK_WRITE_SIZE;
+        /* 1. Set RAM Work Address (ReqSetRamWorkAddress = 0x0201) */
+        uint8_t tx_buf[CHUNK_WRITE_SIZE + sizeof(ebl_pkt_hdr_t) + 64];
+        memset(tx_buf, 0, sizeof(tx_buf));
 
-        pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_WRITE_TO_RAM, data + bytes_written, (uint16_t)chunk_len, pkt_buf, sizeof(pkt_buf));
+        ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_buf;
+        hdr->token = 0x0201;
+        hdr->msg_type = IFWD_MSG_REQ_SET_RAM_ADDR;
+        hdr->length = sizeof(uint32_t);
+        memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), &ram_addr, sizeof(uint32_t));
+
+        size_t send_len = sizeof(ebl_pkt_hdr_t) + sizeof(uint32_t);
+        if (transport_write(s->transport, tx_buf, send_len) != (int)send_len) {
+            fprintf(stderr, "[-] Failed to write ReqSetRamWorkAddress packet\n");
+            return -1;
+        }
+
+        ebl_rsp_prot_conf_t rsp;
+        memset(&rsp, 0, sizeof(rsp));
+        int rn = transport_read(s->transport, &rsp, sizeof(rsp), 3000);
+        if (rn > 0) {
+            printf("[+] RAM work address acknowledged (msg: 0x%04X, ack: 0x%04X, status: 0x%08X)\n",
+                   rsp.msg_type, rsp.ack_type, rsp.status_len);
+            if (rsp.status_len > 0 && rsp.status_len <= 4096) {
+                uint8_t drain[4096];
+                transport_read(s->transport, drain, rsp.status_len, 1000);
+            }
+        } else {
+            fprintf(stderr, "[-] Timeout waiting for ReqSetRamWorkAddress ACK from EP 0x83\n");
+            return -1;
+        }
+
+        /* 2. Write data to RAM in chunks (ReqWriteToRam = 0x0202) */
+        size_t bytes_written = 0;
+        while (bytes_written < size) {
+            size_t chunk_len = size - bytes_written;
+            if (chunk_len > CHUNK_WRITE_SIZE) chunk_len = CHUNK_WRITE_SIZE;
+
+            memset(tx_buf, 0, sizeof(ebl_pkt_hdr_t));
+            ebl_pkt_hdr_t *w_hdr = (ebl_pkt_hdr_t *)tx_buf;
+            w_hdr->token = 0x0202;
+            w_hdr->msg_type = IFWD_MSG_REQ_WRITE_TO_RAM;
+            w_hdr->length = (uint32_t)chunk_len;
+            memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), data + bytes_written, chunk_len);
+
+            send_len = sizeof(ebl_pkt_hdr_t) + chunk_len;
+            if (transport_write(s->transport, tx_buf, send_len) != (int)send_len) {
+                fprintf(stderr, "\n[-] Failed to write RAM block at offset %zu\n", bytes_written);
+                return -1;
+            }
+
+            /* Read ACK (Ping-Pong: EBL requires reading ACK before accepting next OUT block) */
+            ebl_rsp_prot_conf_t w_rsp;
+            memset(&w_rsp, 0, sizeof(w_rsp));
+            rn = transport_read(s->transport, &w_rsp, sizeof(w_rsp), 3000);
+            if (rn <= 0) {
+                fprintf(stderr, "\n[-] Timeout waiting for ReqWriteToRam ACK at offset %zu\n", bytes_written);
+                return -1;
+            }
+            if (w_rsp.status_len > 0 && w_rsp.status_len <= 4096) {
+                uint8_t drain[4096];
+                transport_read(s->transport, drain, w_rsp.status_len, 1000);
+            }
+
+            bytes_written += chunk_len;
+            int percent = (int)((bytes_written * 100) / size);
+            printf("\r[*] Uploading to RAM: %d%% (%zu / %zu bytes)", percent, bytes_written, size);
+            fflush(stdout);
+        }
+        printf("\n[+] Binary uploaded to RAM successfully!\n");
+
+        /* 3. Execute from RAM (ReqExecuteFromRam = 0x0203) */
+        printf("[*] Executing code from RAM at 0x%08X (ReqExecuteFromRam)...\n", ram_addr);
+        memset(tx_buf, 0, sizeof(ebl_pkt_hdr_t));
+        ebl_pkt_hdr_t *e_hdr = (ebl_pkt_hdr_t *)tx_buf;
+        e_hdr->token = 0x0203;
+        e_hdr->msg_type = IFWD_MSG_REQ_EXEC_FROM_RAM;
+        e_hdr->length = sizeof(uint32_t);
+        memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), &ram_addr, sizeof(uint32_t));
+
+        send_len = sizeof(ebl_pkt_hdr_t) + sizeof(uint32_t);
+        if (transport_write(s->transport, tx_buf, send_len) != (int)send_len) {
+            fprintf(stderr, "[-] Failed to send ReqExecuteFromRam command\n");
+            return -1;
+        }
+
+        ebl_rsp_prot_conf_t e_rsp;
+        memset(&e_rsp, 0, sizeof(e_rsp));
+        transport_read(s->transport, &e_rsp, sizeof(e_rsp), 2000);
+
+        printf("[+] Execution command sent! Target is running payload from RAM.\n");
+        return 0;
+    } else {
+        /* UART legacy framing fallback */
+        uint8_t pkt_buf[CHUNK_WRITE_SIZE + 64];
+        uint8_t rx_buf[64];
+        uint32_t addr_val = ram_addr;
+        size_t pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_SET_RAM_ADDR, &addr_val, sizeof(addr_val), pkt_buf, sizeof(pkt_buf));
         if (transport_write(s->transport, pkt_buf, pkt_len) != (int)pkt_len) {
-            fprintf(stderr, "\n[-] Failed to write RAM block at offset %zu\n", bytes_written);
+            fprintf(stderr, "[-] Failed to write ReqSetRamWorkAddress packet\n");
+            return -1;
+        }
+        int rn = transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
+        if (rn > 0) {
+            printf("[+] RAM work address acknowledged (%d bytes)\n", rn);
+        }
+        usleep(10000);
+
+        size_t bytes_written = 0;
+        while (bytes_written < size) {
+            size_t chunk_len = size - bytes_written;
+            if (chunk_len > CHUNK_WRITE_SIZE) chunk_len = CHUNK_WRITE_SIZE;
+
+            pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_WRITE_TO_RAM, data + bytes_written, (uint16_t)chunk_len, pkt_buf, sizeof(pkt_buf));
+            if (transport_write(s->transport, pkt_buf, pkt_len) != (int)pkt_len) {
+                fprintf(stderr, "\n[-] Failed to write RAM block at offset %zu\n", bytes_written);
+                return -1;
+            }
+            transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
+
+            bytes_written += chunk_len;
+            int percent = (int)((bytes_written * 100) / size);
+            printf("\r[*] Uploading to RAM: %d%% (%zu / %zu bytes)", percent, bytes_written, size);
+            fflush(stdout);
+        }
+        printf("\n[+] Binary uploaded to RAM successfully!\n");
+
+        printf("[*] Executing code from RAM at 0x%08X (ReqExecuteFromRam)...\n", ram_addr);
+        pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_EXEC_FROM_RAM, &addr_val, sizeof(addr_val), pkt_buf, sizeof(pkt_buf));
+        if (transport_write(s->transport, pkt_buf, pkt_len) != (int)pkt_len) {
+            fprintf(stderr, "[-] Failed to send ReqExecuteFromRam command\n");
             return -1;
         }
         transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
 
-        bytes_written += chunk_len;
-        int percent = (int)((bytes_written * 100) / size);
-        printf("\r[*] Uploading to RAM: %d%% (%zu / %zu bytes)", percent, bytes_written, size);
-        fflush(stdout);
+        printf("[+] Execution command sent! Target is running payload from RAM.\n");
+        return 0;
     }
-    printf("\n[+] Binary uploaded to RAM successfully!\n");
-
-    /* 3. Execute from RAM (ReqExecuteFromRam = 0x203) */
-    printf("[*] Executing code from RAM at 0x%08X (ReqExecuteFromRam)...\n", ram_addr);
-    pkt_len = ifwd_build_packet(s->channel, IFWD_MSG_REQ_EXEC_FROM_RAM, &addr_val, sizeof(addr_val), pkt_buf, sizeof(pkt_buf));
-    if (transport_write(s->transport, pkt_buf, pkt_len) != (int)pkt_len) {
-        fprintf(stderr, "[-] Failed to send ReqExecuteFromRam command\n");
-        return -1;
-    }
-    transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
-
-    printf("[+] Execution command sent! Target is running payload from RAM.\n");
-    return 0;
 }
 
 int flasher_verify_checksum(flasher_session_t *s, uint32_t start_addr, uint32_t length, uint16_t expected_chk) {
