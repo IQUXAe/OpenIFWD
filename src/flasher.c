@@ -303,29 +303,28 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
 
     /* 1. Select EBL executable chunk:
      * Priority:
-     * a. Chunk with Tag 12 (IMAGE_DATA) and size > 28 (contains Samsung SLB/EBL loader)
-     * b. Tag 19 (SECONDARY_LOADER)
-     * c. Tag 14 (EBL_RAM)
-     * d. Tag 18 (RPSI)
+     * a. Tag 19 (SECONDARY_LOADER / EBL download engine for RAM execution)
+     * b. Tag 14 (EBL_RAM)
+     * c. Tag 18 (RPSI)
+     * d. Tag 12 (IMAGE_DATA - offline bootloader, fallback)
      */
-    const fls_chunk_info_t *chunk = NULL;
-    for (size_t i = 0; i < ebl_fls->chunk_count; i++) {
-        if (ebl_fls->chunks[i].tag == FLS_TAG_IMAGE_DATA && ebl_fls->chunks[i].payload_size > 28) {
-            chunk = &ebl_fls->chunks[i];
-            break;
-        }
-    }
-    if (!chunk) {
-        chunk = fls_find_chunk(ebl_fls, FLS_TAG_IMAGE_DATA);
-    }
-    if (!chunk) {
-        chunk = fls_find_chunk(ebl_fls, FLS_TAG_SECONDARY_LOADER);
-    }
+    const fls_chunk_info_t *chunk = fls_find_chunk(ebl_fls, FLS_TAG_SECONDARY_LOADER);
     if (!chunk) {
         chunk = fls_find_chunk(ebl_fls, FLS_TAG_EBL_RAM);
     }
     if (!chunk) {
         chunk = fls_find_chunk(ebl_fls, FLS_TAG_RPSI);
+    }
+    if (!chunk) {
+        for (size_t i = 0; i < ebl_fls->chunk_count; i++) {
+            if (ebl_fls->chunks[i].tag == FLS_TAG_IMAGE_DATA && ebl_fls->chunks[i].payload_size > 28) {
+                chunk = &ebl_fls->chunks[i];
+                break;
+            }
+        }
+    }
+    if (!chunk) {
+        chunk = fls_find_chunk(ebl_fls, FLS_TAG_IMAGE_DATA);
     }
     if (!chunk) {
         fprintf(stderr, "[-] EBL/SLB payload not found in %s\n", ebl_fls->filepath);
@@ -339,15 +338,25 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
         return -1;
     }
 
-    /* If chunk has 28-byte subheader (Tag 12 IMAGE_DATA):
-     * offset 16 (0x10): sub_len
-     * offset 24 (0x18): sub_offset
-     * Actual binary code begins after byte 28!
+    /* Subheader parsing:
+     * Tag 19 (SECONDARY_LOADER) and Tag 18 (RPSI) have 20-byte subheader:
+     *   offset 8: uint32_t sub_len
+     *   offset 16: uint32_t sub_offset
+     *   Actual binary begins after byte 20!
+     * Tag 12 (IMAGE_DATA) has 28-byte subheader:
+     *   offset 16: uint32_t sub_len
+     *   Actual binary begins after byte 28!
      */
     const uint8_t *ebl_data = raw_data;
     size_t ebl_size = raw_size;
 
-    if (chunk->tag == FLS_TAG_IMAGE_DATA && raw_size > 28) {
+    if ((chunk->tag == FLS_TAG_SECONDARY_LOADER || chunk->tag == FLS_TAG_RPSI) && raw_size > 20) {
+        uint32_t sub_len = *(const uint32_t *)(raw_data + 8);
+        if (sub_len > 0 && sub_len <= raw_size - 20) {
+            ebl_data = raw_data + 20;
+            ebl_size = (size_t)sub_len;
+        }
+    } else if (chunk->tag == FLS_TAG_IMAGE_DATA && raw_size > 28) {
         uint32_t sub_len = *(const uint32_t *)(raw_data + 16);
         if (sub_len > 0 && sub_len <= raw_size - 28) {
             ebl_data = raw_data + 28;
@@ -355,12 +364,6 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
         } else {
             ebl_data = raw_data + 28;
             ebl_size = raw_size - 28;
-        }
-    } else if (chunk->tag == FLS_TAG_RPSI && raw_size > 20) {
-        uint32_t sub_len = *(const uint32_t *)(raw_data + 8);
-        if (sub_len > 0 && sub_len <= raw_size - 20) {
-            ebl_data = raw_data + 20;
-            ebl_size = (size_t)sub_len;
         }
     }
 

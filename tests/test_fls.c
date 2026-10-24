@@ -146,7 +146,7 @@ static void test_firmware_structure(void) {
     const char *slb_path = "/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_slb.fls";
     fls_file_t *slb = fls_open(slb_path);
     if (slb) {
-        /* Secondary Loader (SLB / EBL): Tag 12 must be present */
+        /* Offline Bootloader (SLB): Tag 12 */
         const fls_chunk_info_t *c12 = fls_find_chunk(slb, FLS_TAG_IMAGE_DATA);
         assert(c12 != NULL);
         assert(c12->payload_size == 283728);
@@ -156,6 +156,17 @@ static void test_firmware_structure(void) {
         uint32_t sub_len = *(const uint32_t *)(slb_data + 16);
         assert(sub_len == 283700);
         printf("[+] SLB Tag 12 validated: total %zu bytes, code payload %u bytes\n", slb_sz, sub_len);
+
+        /* RAM Download Engine (EBL): Tag 19 */
+        const fls_chunk_info_t *c19 = fls_find_chunk(slb, FLS_TAG_SECONDARY_LOADER);
+        assert(c19 != NULL);
+        assert(c19->payload_size == 587760);
+        size_t slb19_sz = 0;
+        const uint8_t *slb19_data = fls_get_chunk_payload(slb, c19, &slb19_sz);
+        assert(slb19_data != NULL);
+        uint32_t sub_len19 = *(const uint32_t *)(slb19_data + 8);
+        assert(sub_len19 == 587740);
+        printf("[+] SLB Tag 19 (EBL) validated: total %zu bytes, code payload %u bytes\n", slb19_sz, sub_len19);
 
         assert(slb->toc_count > 0);
         assert(slb->toc_entries[0].mem_class == 2); /* SLB/EBL mem_class */
