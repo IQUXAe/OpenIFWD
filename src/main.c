@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <getopt.h>
 
 static void print_usage(const char *prog) {
@@ -19,7 +20,7 @@ static void print_usage(const char *prog) {
     printf("  info     <file.fls>               Inspect FLS header, chunks and TOC\n");
     printf("  unpack   <file.fls> [out_dir]     Extract binary chunks from FLS container\n");
     printf("  scan                              Scan for connected phone TTY ports\n");
-    printf("  ram-boot -p <port> --bin <file>   Load & execute binary directly in RAM\n");
+    printf("  ram-boot -p <port> [--psi <file>] [--slb <file>] --bin <file>   Load & execute binary directly in RAM\n");
     printf("  flash    [options]                Flash Samsung Star 3 (GT-S5222)\n\n");
     printf("Flash Options:\n");
     printf("  -p, --port <device>     Serial port (e.g. /dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
@@ -35,7 +36,8 @@ static void print_usage(const char *prog) {
     printf("  %s info catfish3g.fls\n", prog);
     printf("  %s unpack catfish3g.fls ./extracted\n", prog);
     printf("  %s scan\n", prog);
-    printf("  %s flash -p /dev/ttyACM0 --psi S5222_psi.fls --slb S5222_slb.fls --bsy S5222_BSY.fls\n", prog);
+    printf("  %s ram-boot -p usb --psi S5222_psi.fls --bin payload.bin\n", prog);
+    printf("  %s flash -p usb --psi S5222_psi.fls --slb S5222_slb.fls --bsy S5222_BSY.fls\n", prog);
     printf("====================================================================\n");
 }
 
@@ -86,20 +88,63 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "ram-boot") == 0) {
         const char *port = NULL;
         const char *psi_path = NULL;
+        const char *slb_path = NULL;
         const char *bin_path = NULL;
         uint32_t ram_addr = 0x20000000; /* Default SDRAM address for X-Gold */
 
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) port = argv[++i];
             else if (strcmp(argv[i], "--psi") == 0 && i + 1 < argc) psi_path = argv[++i];
+            else if (strcmp(argv[i], "--slb") == 0 && i + 1 < argc) slb_path = argv[++i];
             else if (strcmp(argv[i], "--bin") == 0 && i + 1 < argc) bin_path = argv[++i];
             else if (strcmp(argv[i], "--addr") == 0 && i + 1 < argc) ram_addr = (uint32_t)strtoul(argv[++i], NULL, 0);
         }
 
         if (!port || !bin_path) {
             fprintf(stderr, "[-] Error: -p <port> and --bin <file.bin> are required for ram-boot.\n");
-            fprintf(stderr, "    Usage: %s ram-boot -p /dev/ttyACM0 [--psi psi.fls] --bin payload.bin [--addr 0x20000000]\n", argv[0]);
+            fprintf(stderr, "    Usage: %s ram-boot -p /dev/ttyACM0 [--psi psi.fls] [--slb slb.fls] --bin payload.bin [--addr 0x20000000]\n", argv[0]);
             return 1;
+        }
+
+        /* Auto-detect matching SLB file if PSI is provided but SLB was not explicitly given */
+        char auto_slb[1024] = {0};
+        if (psi_path && !slb_path) {
+            char candidate[2048];
+            snprintf(candidate, sizeof(candidate), "%s", psi_path);
+            char *p = strstr(candidate, "psi");
+            if (!p) p = strstr(candidate, "PSI");
+            if (p) {
+                if (p[0] == 'p') {
+                    p[0] = 's'; p[1] = 'l'; p[2] = 'b';
+                } else {
+                    p[0] = 'S'; p[1] = 'L'; p[2] = 'B';
+                }
+                if (access(candidate, R_OK) == 0) {
+                    size_t len = strlen(candidate);
+                    if (len >= sizeof(auto_slb)) len = sizeof(auto_slb) - 1;
+                    memcpy(auto_slb, candidate, len);
+                    auto_slb[len] = '\0';
+                    slb_path = auto_slb;
+                    printf("[*] Auto-detected Secondary Loader (SLB): %s\n", slb_path);
+                }
+            }
+            if (!slb_path) {
+                char dir[512];
+                snprintf(dir, sizeof(dir), "%s", psi_path);
+                char *slash = strrchr(dir, '/');
+                if (slash) {
+                    *slash = '\0';
+                    snprintf(candidate, sizeof(candidate), "%s/slb.fls", dir);
+                    if (access(candidate, R_OK) == 0) {
+                        size_t len = strlen(candidate);
+                        if (len >= sizeof(auto_slb)) len = sizeof(auto_slb) - 1;
+                        memcpy(auto_slb, candidate, len);
+                        auto_slb[len] = '\0';
+                        slb_path = auto_slb;
+                        printf("[*] Auto-detected Secondary Loader (SLB): %s\n", slb_path);
+                    }
+                }
+            }
         }
 
         FILE *bf = fopen(bin_path, "rb");
@@ -141,10 +186,13 @@ int main(int argc, char **argv) {
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.psi_path = psi_path;
+        cfg.slb_path = slb_path;
         cfg.baudrate = 921600;
+        cfg.is_usb = (strcmp(port, "usb") == 0);
 
         flasher_session_t *s = flasher_create(trans, &cfg);
         if (flasher_sync(s, 45) != 0) {
+            fprintf(stderr, "[-] Device synchronization failed\n");
             flasher_destroy(s);
             transport_destroy(trans);
             free(bdata);
@@ -153,14 +201,68 @@ int main(int argc, char **argv) {
 
         if (psi_path) {
             fls_file_t *psi = fls_open(psi_path);
-            if (psi) {
-                flasher_upload_psi(s, psi);
-                fls_close(psi);
+            if (!psi) {
+                fprintf(stderr, "[-] Failed to open PSI: %s\n", psi_path);
+                flasher_destroy(s);
+                transport_destroy(trans);
+                free(bdata);
+                return 1;
             }
+            if (flasher_upload_psi(s, psi) != 0) {
+                fprintf(stderr, "[-] PSI upload failed\n");
+                fls_close(psi);
+                flasher_destroy(s);
+                transport_destroy(trans);
+                free(bdata);
+                return 1;
+            }
+            if (slb_path) {
+                fls_file_t *slb = fls_open(slb_path);
+                if (!slb) {
+                    fprintf(stderr, "[-] Failed to open SLB: %s\n", slb_path);
+                    fls_close(psi);
+                    flasher_destroy(s);
+                    transport_destroy(trans);
+                    free(bdata);
+                    return 1;
+                }
+                if (flasher_upload_ebl(s, slb) != 0) {
+                    fprintf(stderr, "[-] EBL/SLB upload failed\n");
+                    fls_close(slb);
+                    fls_close(psi);
+                    flasher_destroy(s);
+                    transport_destroy(trans);
+                    free(bdata);
+                    return 1;
+                }
+                fls_close(slb);
+            } else {
+                /* When no SLB is provided, inject RPSI (Tag 12 from psi.fls) as stage 2 loader */
+                printf("[*] No separate SLB provided, using RPSI from %s as stage 2 loader\n", psi_path);
+                if (flasher_upload_ebl(s, psi) != 0) {
+                    fprintf(stderr, "[-] RPSI upload failed\n");
+                    fls_close(psi);
+                    flasher_destroy(s);
+                    transport_destroy(trans);
+                    free(bdata);
+                    return 1;
+                }
+            }
+            fls_close(psi);
         }
 
-        flasher_configure_protocol(s);
+        if (flasher_configure_protocol(s) != 0) {
+            fprintf(stderr, "[-] Protocol configuration failed\n");
+            flasher_destroy(s);
+            transport_destroy(trans);
+            free(bdata);
+            return 1;
+        }
+
         int res = flasher_boot_ram(s, ram_addr, bdata, (size_t)bsz);
+        if (res != 0) {
+            fprintf(stderr, "[-] RAM boot execution failed\n");
+        }
 
         free(bdata);
         flasher_destroy(s);
@@ -210,8 +312,10 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        cfg.is_usb = (strcmp(port, "usb") == 0);
+
         transport_t *trans = NULL;
-        if (strcmp(port, "usb") == 0) {
+        if (cfg.is_usb) {
             trans = transport_create_usb();
             if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
                 fprintf(stderr, "[-] Failed to open direct USB interface\n");

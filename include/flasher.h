@@ -17,12 +17,14 @@ typedef struct {
     const char *dffs_path;
     uint32_t baudrate;
     bool erase_all;
+    bool is_usb;
 } flasher_config_t;
 
 typedef struct {
     transport_t *transport;
     flasher_config_t config;
     uint8_t channel;
+    uint8_t chip_id;
     uint32_t target_platform;
     char ebl_version[64];
 } flasher_session_t;
