@@ -33,6 +33,7 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
     /* Known Samsung & Infineon Vendor IDs */
     static const struct { uint16_t vid; uint16_t pid; } known_devices[] = {
         { 0x058b, 0x0041 }, /* Infineon Flash Loader utility (Boot ROM) */
+        { 0x058b, 0x1141 }, /* Infineon Flash Loader / FlashUSB (EBL) */
         { 0x058b, 0x0015 }, /* Infineon FlashUSB */
         { 0x04e8, 0x6860 }, /* Samsung USB */
         { 0x04e8, 0x6601 }, /* Samsung Download Mode */
@@ -241,8 +242,29 @@ static int usb_flush(transport_t *t) {
 }
 
 static int usb_reclaim(transport_t *t) {
-    /* Do not send EP 0x00 control transfers (clear_halt) which freeze on minimal BROM/EBL EP0 */
-    return usb_flush(t);
+    usb_priv_t *priv = (usb_priv_t *)t->priv;
+    if (!priv->dev_handle) return -1;
+
+    printf("[*] Performing USB bus reset (SE0) to trigger EBL enumeration...\n");
+    int r = libusb_reset_device(priv->dev_handle);
+    if (r != 0) {
+        printf("[*] Bus reset notification: %s (initiating re-enumeration)\n", libusb_error_name(r));
+    }
+
+    /* Release old interface and close old handle */
+    usb_close(t);
+
+    /* Settling delay for Linux kernel xHCI and EBL to re-enumerate and configure endpoints */
+    printf("[*] Waiting for USB re-enumeration...\n");
+    usleep(600000); /* 600ms */
+
+    /* Re-open USB device with fresh enumeration and claimed interface */
+    if (usb_open(t, NULL, 115200) != 0) {
+        fprintf(stderr, "[-] Failed to re-open USB device after bus reset\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 static void usb_destroy(transport_t *t) {

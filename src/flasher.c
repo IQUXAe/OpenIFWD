@@ -476,7 +476,17 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
     printf("[+] Target signaled EBL execution start (0x17 0xA5)\n");
     printf("[*] Waiting 200ms for EBL startup...\n");
     usleep(200000);
-    transport_flush(s->transport);
+
+    /* Trigger USB bus reset (SE0) so EBL receives SET_CONFIGURATION and activates Bulk endpoints */
+    if (s->config.is_usb) {
+        if (transport_reclaim(s->transport) != 0) {
+            fprintf(stderr, "[-] Failed to re-enumerate EBL on USB\n");
+            return -1;
+        }
+    } else {
+        transport_flush(s->transport);
+    }
+
     printf("[+] Target EBL active.\n");
 
     /* Switch baudrate if requested (for UART) */
