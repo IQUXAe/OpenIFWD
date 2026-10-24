@@ -472,9 +472,27 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
         return -1;
     }
 
-    /* 8. Settle delay and flush */
-    usleep(200000);
-    transport_flush(s->transport);
+    /* 8. Target signaled EBL execution start (0x17 0xA5) */
+    printf("[+] Target signaled EBL execution start (0x17 0xA5)\n");
+    printf("[*] Waiting 500ms for EBL hardware initialization and BBM mount...\n");
+    usleep(500000);
+
+    /* Synchronize USB interface and reset Data Toggles with EBL */
+    if (s->config.is_usb) {
+        printf("[*] Cycling USB interface to synchronize Data Toggles with EBL...\n");
+        if (transport_reclaim(s->transport) != 0) {
+            printf("[*] Performing full USB reconnect...\n");
+            transport_close(s->transport);
+            usleep(100000);
+            if (transport_open(s->transport, NULL, 115200) != 0) {
+                fprintf(stderr, "[-] Failed to re-open USB interface for EBL\n");
+                return -1;
+            }
+        }
+    } else {
+        transport_flush(s->transport);
+    }
+
     printf("[+] Target EBL active.\n");
 
     /* Switch baudrate if requested (for UART) */
@@ -512,7 +530,9 @@ int flasher_configure_protocol(flasher_session_t *s) {
     uint8_t rx_buf[256];
     int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 2000);
     if (n > 0) {
-        printf("[+] Protocol configuration acknowledged (%d bytes)\n", n);
+        printf("[+] Protocol configuration acknowledged (%d bytes): ", n);
+        for (int i = 0; i < n && i < 16; i++) printf("0x%02X ", rx_buf[i]);
+        printf("\n");
         return 0;
     }
     printf("[*] Proceeding with default protocol configuration\n");
@@ -628,7 +648,10 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
         fprintf(stderr, "[-] Failed to write ReqSetRamWorkAddress packet\n");
         return -1;
     }
-    transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
+    int rn = transport_read(s->transport, rx_buf, sizeof(rx_buf), 1000);
+    if (rn > 0) {
+        printf("[+] RAM work address acknowledged (%d bytes)\n", rn);
+    }
     usleep(10000);
 
     /* 2. Write data to RAM in chunks (ReqWriteToRam = 0x202) */

@@ -136,6 +136,8 @@ static int usb_close(transport_t *t) {
         libusb_exit(priv->ctx);
         priv->ctx = NULL;
     }
+    priv->rx_head = 0;
+    priv->rx_tail = 0;
     return 0;
 }
 
@@ -202,7 +204,7 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         int transferred = 0;
         int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
         if (r != 0) {
-            if (r == LIBUSB_ERROR_PIPE) {
+            if (r == LIBUSB_ERROR_PIPE || r == LIBUSB_ERROR_TIMEOUT) {
                 libusb_clear_halt(priv->dev_handle, priv->ep_out);
                 r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
             }
@@ -257,7 +259,7 @@ static int usb_reclaim(transport_t *t) {
 
     /* Release and re-claim interface to reset host xHCI endpoint rings and Data Toggles */
     libusb_release_interface(priv->dev_handle, priv->interface_number);
-    usleep(30000); /* 30ms settling */
+    usleep(50000); /* 50ms settling */
     int r = libusb_claim_interface(priv->dev_handle, priv->interface_number);
     if (r < 0) {
         fprintf(stderr, "[-] Failed to re-claim interface %d: %s\n",
