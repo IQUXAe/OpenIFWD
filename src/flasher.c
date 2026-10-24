@@ -280,7 +280,150 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         return -1;
     }
 
-    /* PSI starts executing immediately in SRAM and will transmit its readiness token */
+    /* For X-Gold 215 / PMB8815 (Chip ID 0x17):
+     * Boot ROM executed the 6,296-byte embedded PSI into internal SRAM at 0x80000.
+     * The embedded PSI reinitializes the USB controller, resets endpoint Data Toggles to DATA0,
+     * and now expects Stage 2: RPSI (RAM Primary Stage Initializer, 57,644 bytes) to be
+     * uploaded to SRAM at 0x82000 to initialize Mobile DDR SDRAM!
+     */
+    if (s->chip_id == 0x17 && psi_fls) {
+        /* 1. Settling delay for embedded PSI to initialize CPU clocks and USB controller */
+        usleep(100000);
+
+        /* 2. Resynchronize USB interface and Data Toggles to DATA0 */
+        if (s->config.is_usb) {
+            transport_reclaim(s->transport);
+        }
+
+        /* 3. Wait for Boot ROM PSI readiness handshake token:
+         * Embedded PSI transmits 2-byte token [0x00, 0xAA] on EP 0x83.
+         */
+        printf("[*] Waiting for Boot ROM PSI readiness token...\n");
+        uint8_t rpsi_tok[4] = {0};
+        int rpsi_tn = 0;
+        while (rpsi_tn < 2) {
+            int br = transport_read(s->transport, rpsi_tok + rpsi_tn, 2 - rpsi_tn, 3000);
+            if (br <= 0) break;
+            rpsi_tn += br;
+        }
+        if (rpsi_tn >= 2) {
+            printf("[+] Target signaled readiness for RPSI (token 0x%02X 0x%02X)\n",
+                   rpsi_tok[0], rpsi_tok[1]);
+        } else {
+            printf("[*] Readiness token timeout, proceeding with RPSI length header\n");
+        }
+
+        /* 4. Extract RPSI (Tag 18) from psi_fls */
+        const fls_chunk_info_t *rpsi_chunk = fls_find_chunk(psi_fls, FLS_TAG_RPSI);
+        if (!rpsi_chunk) {
+            rpsi_chunk = fls_find_chunk(psi_fls, FLS_TAG_IMAGE_DATA);
+        }
+        if (!rpsi_chunk) {
+            fprintf(stderr, "[-] RPSI chunk (Tag 18) not found in %s\n", psi_fls->filepath);
+            return -1;
+        }
+
+        size_t raw_rpsi_sz = 0;
+        const uint8_t *raw_rpsi = fls_get_chunk_payload(psi_fls, rpsi_chunk, &raw_rpsi_sz);
+        if (!raw_rpsi || raw_rpsi_sz == 0) {
+            fprintf(stderr, "[-] Empty RPSI payload in %s\n", psi_fls->filepath);
+            return -1;
+        }
+
+        const uint8_t *rpsi_data = raw_rpsi;
+        size_t rpsi_size = raw_rpsi_sz;
+        if (rpsi_chunk->tag == FLS_TAG_RPSI && raw_rpsi_sz > 20) {
+            uint32_t sub_len = *(const uint32_t *)(raw_rpsi + 12);
+            if (sub_len > 0 && sub_len <= raw_rpsi_sz - 20) {
+                rpsi_data = raw_rpsi + 20;
+                rpsi_size = (size_t)sub_len;
+            }
+        }
+
+        printf("[*] Uploading RPSI (chunk Tag %u: %zu bytes)...\n", rpsi_chunk->tag, rpsi_size);
+
+        /* 5. Send 4-byte RPSI length header (little-endian) */
+        uint8_t len_hdr[4];
+        len_hdr[0] = (uint8_t)(rpsi_size & 0xFF);
+        len_hdr[1] = (uint8_t)((rpsi_size >> 8) & 0xFF);
+        len_hdr[2] = (uint8_t)((rpsi_size >> 16) & 0xFF);
+        len_hdr[3] = (uint8_t)((rpsi_size >> 24) & 0xFF);
+
+        if (transport_write(s->transport, len_hdr, 4) != 4) {
+            fprintf(stderr, "[-] Failed to write RPSI length header\n");
+            return -1;
+        }
+
+        /* 6. Read length acknowledgement from Boot ROM PSI (expected: 0xCC 0xCC) */
+        uint8_t len_ack[4] = {0};
+        int an = transport_read(s->transport, len_ack, 2, 3000);
+        if (an > 0) {
+            printf("[+] Boot ROM PSI acknowledged RPSI length (token: ");
+            for (int i = 0; i < an; i++) printf("0x%02X ", len_ack[i]);
+            printf(")\n");
+        }
+
+        /* 7. Stream RPSI payload in 512-byte chunks and calculate XOR-8 checksum */
+        printf("[*] Streaming RPSI payload (%zu bytes in 512-byte chunks)...\n", rpsi_size);
+        size_t rpsi_sent = 0;
+        uint8_t rpsi_chk8 = 0;
+        while (rpsi_sent < rpsi_size) {
+            size_t chunk_len = rpsi_size - rpsi_sent;
+            if (chunk_len > 512) chunk_len = 512;
+
+            if (transport_write(s->transport, rpsi_data + rpsi_sent, chunk_len) != (int)chunk_len) {
+                fprintf(stderr, "\n[-] Failed to write RPSI stream chunk at offset %zu\n", rpsi_sent);
+                return -1;
+            }
+
+            for (size_t i = 0; i < chunk_len; i++) {
+                rpsi_chk8 ^= rpsi_data[rpsi_sent + i];
+            }
+
+            rpsi_sent += chunk_len;
+            int percent = (int)((rpsi_sent * 100) / rpsi_size);
+            printf("\r[*] RPSI upload progress: %3d%% (%zu / %zu bytes)", percent, rpsi_sent, rpsi_size);
+            fflush(stdout);
+            usleep(100);
+        }
+        printf("\n[+] RPSI payload streamed successfully.\n");
+
+        /* 8. Send 1-byte XOR-8 checksum */
+        printf("[*] Sending RPSI XOR-8 checksum (0x%02X)...\n", rpsi_chk8);
+        if (transport_write(s->transport, &rpsi_chk8, 1) != 1) {
+            fprintf(stderr, "[-] Failed to write RPSI XOR-8 checksum\n");
+            return -1;
+        }
+
+        /* 9. Wait for RPSI execution confirmation from Boot ROM PSI (expected: 0xA5) */
+        uint8_t rpsi_ack[4] = {0};
+        int ar = transport_read(s->transport, rpsi_ack, 1, 5000);
+        if (ar > 0) {
+            printf("[+] Target response after RPSI upload (Ack: 0x%02X)\n", rpsi_ack[0]);
+            if (rpsi_ack[0] == 0xA5 || rpsi_ack[0] == 0x01 || rpsi_ack[0] == 0xCC) {
+                printf("[+] RPSI verified and running in SRAM!\n");
+            } else {
+                fprintf(stderr, "[-] Unexpected RPSI ACK: 0x%02X\n", rpsi_ack[0]);
+                return -1;
+            }
+        } else {
+            fprintf(stderr, "[-] Timeout waiting for RPSI ACK from target\n");
+            return -1;
+        }
+
+        /* 10. Give RPSI 150ms to initialize Mobile DDR SDRAM */
+        usleep(150000);
+
+        /* Read RPSI banner / status if available */
+        uint8_t banner_buf[128] = {0};
+        int bn = transport_read(s->transport, banner_buf, sizeof(banner_buf) - 1, 1000);
+        if (bn > 0) {
+            banner_buf[bn] = '\0';
+            printf("[+] RPSI status banner (%d bytes): %s\n", bn, (char *)banner_buf);
+        }
+        printf("[+] Primary Stage Initializer (PSI + RPSI) completed successfully!\n");
+    }
+
     return 0;
 }
 

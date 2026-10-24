@@ -248,6 +248,39 @@ static int usb_flush(transport_t *t) {
     return 0;
 }
 
+static int usb_reclaim(transport_t *t) {
+    usb_priv_t *priv = (usb_priv_t *)t->priv;
+    if (!priv->dev_handle) return -1;
+
+    priv->rx_head = 0;
+    priv->rx_tail = 0;
+
+    /* Release and re-claim interface to reset host xHCI endpoint rings and Data Toggles */
+    libusb_release_interface(priv->dev_handle, priv->interface_number);
+    usleep(30000); /* 30ms settling */
+    int r = libusb_claim_interface(priv->dev_handle, priv->interface_number);
+    if (r < 0) {
+        fprintf(stderr, "[-] Failed to re-claim interface %d: %s\n",
+                priv->interface_number, libusb_error_name(r));
+        return -1;
+    }
+
+    /* Reset endpoint halt condition and reset hardware data toggle sequence to DATA0 */
+    libusb_clear_halt(priv->dev_handle, priv->ep_out);
+    libusb_clear_halt(priv->dev_handle, priv->ep_in);
+
+    /* Drain any stale packets */
+    if (priv->ep_in) {
+        unsigned char dummy[512];
+        int transferred = 0;
+        while (libusb_bulk_transfer(priv->dev_handle, priv->ep_in, dummy, sizeof(dummy), &transferred, 20) == 0 && transferred > 0) {
+            /* drained */
+        }
+    }
+
+    return 0;
+}
+
 static void usb_destroy(transport_t *t) {
     if (!t) return;
     usb_close(t);
@@ -263,6 +296,7 @@ static const transport_ops_t usb_ops = {
     .set_baudrate = usb_set_baudrate,
     .set_control = usb_set_control,
     .flush = usb_flush,
+    .reclaim = usb_reclaim,
     .destroy = usb_destroy
 };
 

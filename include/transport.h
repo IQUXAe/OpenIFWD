@@ -19,6 +19,7 @@ typedef struct {
     int (*set_baudrate)(transport_t *t, uint32_t baudrate);
     int (*set_control)(transport_t *t, bool dtr, bool rts);
     int (*flush)(transport_t *t);
+    int (*reclaim)(transport_t *t);
     void (*destroy)(transport_t *t);
 } transport_ops_t;
 
@@ -58,6 +59,10 @@ static inline int transport_set_control(transport_t *t, bool dtr, bool rts) {
 
 static inline int transport_flush(transport_t *t) {
     return t && t->ops && t->ops->flush ? t->ops->flush(t) : -1;
+}
+
+static inline int transport_reclaim(transport_t *t) {
+    return t && t->ops && t->ops->reclaim ? t->ops->reclaim(t) : 0;
 }
 
 static inline void transport_destroy(transport_t *t) {

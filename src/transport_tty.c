@@ -225,6 +225,7 @@ static const transport_ops_t tty_ops = {
     .set_baudrate = tty_set_baudrate,
     .set_control = tty_set_control,
     .flush = tty_flush,
+    .reclaim = tty_flush,
     .destroy = tty_destroy
 };
 
