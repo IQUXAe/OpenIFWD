@@ -32,92 +32,103 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
     if (!s) return -1;
     bool is_usb = s->config.is_usb;
 
+    printf("[*] Probing Boot ROM synchronization (Ping-Pong ATAT sync)...\n");
+    printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
+
     if (!is_usb) {
-        printf("[*] Starting UART handshake (sending ATAT sync)...\n");
-        printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
-        /* Set DTR/RTS once before sync loop */
+        /* Set DTR/RTS once before sync loop for UART */
         transport_set_control(s->transport, true, true);
-    } else {
-        printf("[*] USB mode: waiting for device Boot ROM banner (no ATAT sync)...\n");
-        printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
     }
 
     time_t start = time(NULL);
-    uint8_t at_cmd[] = "ATAT\r\n";
-    uint8_t rx_buf[64];
+    const uint8_t sync_seq[] = "ATAT";
+    uint8_t ident_stream[128];
+    int ident_len = 0;
+    bool synced = false;
 
     while (time(NULL) - start < timeout_sec) {
-        if (!is_usb) {
-            transport_write(s->transport, at_cmd, 4);
-        }
+        /* Send strictly ONE ATAT probe (4 bytes) per attempt */
+        transport_write(s->transport, sync_seq, 4);
 
-        int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 200);
+        /* Give Boot ROM time to respond and check Bulk IN */
+        uint8_t rx_buf[64];
+        int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 50);
         if (n > 0) {
-            printf("[*] Received %d byte(s) from target: ", n);
+            printf("[*] Target response: %d byte(s): ", n);
             for (int i = 0; i < n; i++) {
                 printf("0x%02X ", rx_buf[i]);
             }
             printf("\n");
 
-            bool has_data = false;
-            for (int i = 0; i < n; i++) {
-                if (rx_buf[i] != 0x00) {
-                    has_data = true;
+            for (int i = 0; i < n && ident_len < (int)sizeof(ident_stream); i++) {
+                ident_stream[ident_len++] = rx_buf[i];
+            }
+
+            /* Check if we received 0xF0 Boot ROM token */
+            for (int i = 0; i < ident_len; i++) {
+                if (ident_stream[i] == 0xF0) {
+                    synced = true;
                     break;
                 }
             }
 
-            if (has_data) {
-                uint8_t ident_stream[128];
-                int ident_len = 0;
-                for (int i = 0; i < n && ident_len < (int)sizeof(ident_stream); i++) {
-                    ident_stream[ident_len++] = rx_buf[i];
-                }
-
-                /* Drain remaining identification packet bytes from Boot ROM */
-                uint8_t drain_buf[64];
-                int dn;
-                while ((dn = transport_read(s->transport, drain_buf, sizeof(drain_buf), 100)) > 0) {
-                    printf("[*] Drained %d byte(s) of chip ID data: ", dn);
-                    for (int i = 0; i < dn; i++) {
-                        printf("0x%02X ", drain_buf[i]);
-                        if (ident_len < (int)sizeof(ident_stream)) {
-                            ident_stream[ident_len++] = drain_buf[i];
-                        }
-                    }
-                    printf("\n");
-                }
-
-                /* Extract target chip ID from identification stream:
-                 * Stream format: [0xF0 (sync), len (e.g. 0x0A), chip_id (e.g. 0x17), ...]
-                 * If byte 0 is 0xF0 or 0x00, byte 1 is header/length, byte 2 is the chip ID.
-                 */
-                s->chip_id = 0;
-                if (ident_len >= 3) {
-                    s->chip_id = ident_stream[2];
-                } else if (ident_len >= 2) {
-                    s->chip_id = ident_stream[1];
-                }
-
-                if (s->chip_id != 0) {
-                    printf("[+] Detected Target Chip ID: 0x%02X\n", s->chip_id);
-                } else {
-                    /* Default to PMB8812 / X-Gold 223 */
-                    s->chip_id = 0x17;
-                    printf("[*] Defaulting to Target Chip ID: 0x%02X\n", s->chip_id);
-                }
-
-                printf("[+] Device synchronized successfully!\n");
-                transport_flush(s->transport);
-                usleep(20000); /* Settle USB pipe before Boot ROM upload */
-                return 0;
+            if (synced) {
+                printf("[+] Received Boot ROM sync token 0xF0! Halting sync probe.\n");
+                break;
             }
         }
-        usleep(50000);
+        usleep(30000); /* 30ms between ping attempts */
     }
 
-    fprintf(stderr, "[-] Synchronization timeout (%d sec)\n", timeout_sec);
-    return -1;
+    if (!synced) {
+        fprintf(stderr, "[-] Synchronization timeout (%d sec)\n", timeout_sec);
+        return -1;
+    }
+
+    /* Drain remaining identification packet bytes from Boot ROM */
+    uint8_t drain_buf[64];
+    int dn;
+    while ((dn = transport_read(s->transport, drain_buf, sizeof(drain_buf), 100)) > 0) {
+        printf("[*] Drained %d byte(s) of chip ID data: ", dn);
+        for (int i = 0; i < dn; i++) {
+            printf("0x%02X ", drain_buf[i]);
+            if (ident_len < (int)sizeof(ident_stream)) {
+                ident_stream[ident_len++] = drain_buf[i];
+            }
+        }
+        printf("\n");
+    }
+
+    /* Extract target chip ID from identification stream:
+     * Stream format: [0xF0 (sync), len (e.g. 0x0A), chip_id (e.g. 0x17), ...]
+     */
+    s->chip_id = 0;
+    int f0_pos = -1;
+    for (int i = 0; i < ident_len; i++) {
+        if (ident_stream[i] == 0xF0) {
+            f0_pos = i;
+            break;
+        }
+    }
+
+    if (f0_pos >= 0 && f0_pos + 2 < ident_len) {
+        s->chip_id = ident_stream[f0_pos + 2];
+    } else if (ident_len >= 3) {
+        s->chip_id = ident_stream[2];
+    } else if (ident_len >= 2) {
+        s->chip_id = ident_stream[1];
+    }
+
+    if (s->chip_id != 0) {
+        printf("[+] Detected Target Chip ID: 0x%02X\n", s->chip_id);
+    } else {
+        s->chip_id = 0x17;
+        printf("[*] Defaulting to Target Chip ID: 0x%02X\n", s->chip_id);
+    }
+
+    printf("[+] Device synchronized successfully! Bulk OUT FIFO is clean.\n");
+    usleep(20000); /* Settle USB pipe before Boot ROM upload */
+    return 0;
 }
 
 int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
