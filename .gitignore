@@ -13,6 +13,7 @@ test_runner
 # Proprietary binaries, firmware images and logs
 firmware/
 FlashTool_E2_OD/
+flashtools/
 *.fls
 *.dffs
 *.bin
