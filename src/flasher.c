@@ -293,26 +293,20 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
          */
         usleep(30000);
 
-        /* 2. Wait for Boot ROM PSI readiness handshake token:
-         * Embedded PSI transmits 2-byte token [0x00, 0xAA] on EP 0x83.
+        /* 2. Optional readiness token check:
+         * In UART mode, embedded PSI transmits [0x00, 0xAA] to sync baudrate.
+         * In USB Full-Speed mode, the SoC enters rx loop at 0x80240 immediately waiting for 4-byte length.
+         * We do a quick non-blocking check (50ms); if not received, we send length directly.
          */
-        printf("[*] Waiting for Boot ROM PSI readiness token (expected [0x00, 0xAA])...\n");
         uint8_t rpsi_tok[4] = {0};
-        int rpsi_tn = 0;
-        while (rpsi_tn < 2) {
-            int br = transport_read(s->transport, rpsi_tok + rpsi_tn, 2 - rpsi_tn, 3000);
-            if (br <= 0) break;
-            rpsi_tn += br;
-        }
-        if (rpsi_tn < 2) {
-            fprintf(stderr, "[-] Timeout waiting for Boot ROM PSI readiness token\n");
-            return -1;
-        }
-        printf("[+] Target signaled readiness for RPSI (token: 0x%02X 0x%02X)\n",
-               rpsi_tok[0], rpsi_tok[1]);
-        if (rpsi_tok[0] != 0x00 || rpsi_tok[1] != 0xAA) {
-            fprintf(stderr, "[!] Warning: unexpected readiness token (got 0x%02X 0x%02X, expected 0x00 0xAA)\n",
-                    rpsi_tok[0], rpsi_tok[1]);
+        int tok_ret = transport_read(s->transport, rpsi_tok, 2, 50);
+        if (tok_ret == 2 && rpsi_tok[0] == 0x00 && rpsi_tok[1] == 0xAA) {
+            printf("[+] Target signaled readiness for RPSI (token: 0x%02X 0x%02X)\n",
+                   rpsi_tok[0], rpsi_tok[1]);
+        } else if (tok_ret > 0) {
+            printf("[*] Target sent %d preliminary byte(s): 0x%02X\n", tok_ret, rpsi_tok[0]);
+        } else {
+            printf("[*] USB mode: skipping optional token, sending RPSI length header directly...\n");
         }
 
         /* 3. Extract RPSI (Tag 18) from psi_fls */
@@ -351,22 +345,46 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         len_hdr[2] = (uint8_t)((rpsi_size >> 16) & 0xFF);
         len_hdr[3] = (uint8_t)((rpsi_size >> 24) & 0xFF);
 
+        printf("[*] Sending RPSI length header: %zu bytes (0x%02X 0x%02X 0x%02X 0x%02X)...\n",
+               rpsi_size, len_hdr[0], len_hdr[1], len_hdr[2], len_hdr[3]);
         if (transport_write(s->transport, len_hdr, 4) != 4) {
             fprintf(stderr, "[-] Failed to write RPSI length header\n");
             return -1;
         }
 
         /* 5. Read length acknowledgement from Boot ROM PSI (expected: 0xCC 0xCC) */
-        uint8_t len_ack[4] = {0};
+        printf("[*] Waiting for RPSI length acknowledgement [0xCC, 0xCC]...\n");
+        uint8_t len_ack[8] = {0};
         int an = 0;
-        while (an < 2) {
-            int br = transport_read(s->transport, len_ack + an, 2 - an, 3000);
-            if (br <= 0) break;
-            an += br;
+        time_t ack_start = time(NULL);
+        bool len_confirmed = false;
+        while (time(NULL) - ack_start < 4) {
+            int r = transport_read(s->transport, len_ack + an, sizeof(len_ack) - an, 1000);
+            if (r > 0) {
+                an += r;
+                for (int i = 0; i + 1 < an; i++) {
+                    if (len_ack[i] == 0xCC && len_ack[i+1] == 0xCC) {
+                        len_confirmed = true;
+                        break;
+                    }
+                }
+                if (len_confirmed) break;
+            }
         }
-        if (an >= 2) {
-            printf("[+] Boot ROM PSI acknowledged RPSI length (token: 0x%02X 0x%02X)\n",
-                   len_ack[0], len_ack[1]);
+        if (len_confirmed) {
+            printf("[+] Boot ROM PSI acknowledged RPSI length: [0xCC, 0xCC]!\n");
+        } else if (an > 0) {
+            printf("[*] Target response to length header (%d byte(s): ", an);
+            for (int i = 0; i < an; i++) printf("0x%02X ", len_ack[i]);
+            printf(")\n");
+            bool ok = false;
+            for (int i = 0; i < an; i++) {
+                if (len_ack[i] == 0xCC || len_ack[i] == 0x01 || len_ack[i] == 0xA5) ok = true;
+            }
+            if (!ok) {
+                fprintf(stderr, "[-] Unexpected response to RPSI length header\n");
+                return -1;
+            }
         } else {
             fprintf(stderr, "[-] Timeout waiting for RPSI length acknowledgement\n");
             return -1;
@@ -405,22 +423,31 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         }
 
         /* 8. Wait for RPSI execution confirmation from Boot ROM PSI (expected: 2 bytes [status, 0xA5]) */
-        uint8_t rpsi_ack[4] = {0};
+        uint8_t rpsi_ack[8] = {0};
         int ar = 0;
-        while (ar < 2) {
-            int br = transport_read(s->transport, rpsi_ack + ar, 2 - ar, 5000);
-            if (br <= 0) break;
-            ar += br;
+        time_t exec_start = time(NULL);
+        bool exec_confirmed = false;
+        while (time(NULL) - exec_start < 5) {
+            int r = transport_read(s->transport, rpsi_ack + ar, sizeof(rpsi_ack) - ar, 1000);
+            if (r > 0) {
+                ar += r;
+                for (int i = 0; i < ar; i++) {
+                    if (rpsi_ack[i] == 0xA5 || rpsi_ack[i] == 0xCC || rpsi_ack[i] == 0x01) {
+                        exec_confirmed = true;
+                        break;
+                    }
+                }
+                if (exec_confirmed) break;
+            }
         }
         if (ar > 0) {
-            printf("[+] Target response after RPSI upload (%d byte(s): 0x%02X", ar, rpsi_ack[0]);
-            if (ar > 1) printf(" 0x%02X", rpsi_ack[1]);
+            printf("[+] Target response after RPSI upload (%d byte(s): ", ar);
+            for (int i = 0; i < ar; i++) printf("0x%02X ", rpsi_ack[i]);
             printf(")\n");
-            if (rpsi_ack[0] == 0xA5 || (ar > 1 && rpsi_ack[1] == 0xA5) ||
-                rpsi_ack[0] == 0x01 || rpsi_ack[0] == 0xCC) {
+            if (exec_confirmed) {
                 printf("[+] RPSI verified and running in SRAM!\n");
             } else {
-                fprintf(stderr, "[-] Unexpected RPSI ACK: 0x%02X\n", rpsi_ack[0]);
+                fprintf(stderr, "[-] Unexpected RPSI ACK\n");
                 return -1;
             }
         } else {
