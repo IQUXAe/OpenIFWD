@@ -213,10 +213,29 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         return -1;
     }
 
-    /* 2. Stream raw PSI payload */
-    if (transport_write(s->transport, psi_data, psi_size) != (int)psi_size) {
-        fprintf(stderr, "[-] Failed to write PSI payload\n");
-        return -1;
+    /* Probe for potential header acknowledgement from Boot ROM on Bulk IN (EP 0x83) */
+    uint8_t hdr_ack = 0;
+    int ack_res = transport_read(s->transport, &hdr_ack, 1, 50);
+    if (ack_res > 0) {
+        printf("[*] Target header response on EP 0x83: 0x%02X\n", hdr_ack);
+    }
+
+    /* Settling delay (15ms) to give Boot ROM time to arm its USB Bulk OUT FIFO */
+    usleep(15000);
+
+    /* 2. Stream raw PSI payload in 64-byte chunks (USB Full-Speed MTU) with micro-pacing */
+    printf("[*] Streaming PSI payload (%zu bytes in 64-byte chunks with pacing)...\n", psi_size);
+    size_t sent = 0;
+    while (sent < psi_size) {
+        size_t chunk = psi_size - sent;
+        if (chunk > 64) chunk = 64;
+        int written = transport_write(s->transport, psi_data + sent, chunk);
+        if (written != (int)chunk) {
+            fprintf(stderr, "[-] Failed to write PSI payload chunk at offset %zu (%zu bytes)\n", sent, chunk);
+            return -1;
+        }
+        sent += chunk;
+        usleep(500); /* 500us pacing for BROM ARM9 FIFO draining */
     }
 
     /* 3. Send 1-byte XOR-8 checksum of payload */
