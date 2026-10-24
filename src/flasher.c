@@ -266,7 +266,7 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
 
     /* 4. Wait for Target Boot ROM ACK (expected: 0x01, or 0x0B, 0xB1, 0xC1) */
     uint8_t ack_buf[4] = {0};
-    int r = transport_read(s->transport, ack_buf, sizeof(ack_buf), 5000);
+    int r = transport_read(s->transport, ack_buf, 1, 5000);
     if (r > 0) {
         printf("[+] PSI acknowledged by Boot ROM (%d byte(s), Ack: 0x%02X)\n", r, ack_buf[0]);
         if (ack_buf[0] == 0x01 || ack_buf[0] == 0x0B || ack_buf[0] == 0xB1 || ack_buf[0] == 0xC1) {
@@ -280,9 +280,7 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         return -1;
     }
 
-    /* Give PSI time to initialize DDR SDRAM and USB peripheral hardware */
-    usleep(150000);
-    transport_flush(s->transport);
+    /* PSI starts executing immediately in SRAM and will transmit its readiness token */
     return 0;
 }
 
@@ -362,11 +360,16 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
     printf("[*] Waiting for PSI stage synchronization token...\n");
     int header_len = 4;
     uint8_t early_tok[4] = {0};
-    int tn = transport_read(s->transport, early_tok, 2, 4000);
+    int tn = 0;
+    while (tn < 2) {
+        int br = transport_read(s->transport, early_tok + tn, 2 - tn, 3000);
+        if (br <= 0) break;
+        tn += br;
+    }
     if (tn >= 2) {
         printf("[+] Target signaled readiness for EBL (token 0x%02X 0x%02X)\n", early_tok[0], early_tok[1]);
         if (early_tok[0] == 0xAA && early_tok[1] == 0xAA) {
-            header_len = (ebl_size > 0xFFFF) ? 4 : 2;
+            header_len = 2;
         } else if (early_tok[0] == 0x00 && early_tok[1] == 0xAA) {
             header_len = 4;
         }
@@ -399,12 +402,12 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
     }
 
     /* 5. Stream EBL payload in chunks and calculate XOR-8 checksum */
-    printf("[*] Streaming EBL payload (%zu bytes)...\n", ebl_size);
+    printf("[*] Streaming EBL payload (%zu bytes in 512-byte chunks)...\n", ebl_size);
     size_t bytes_written = 0;
     uint8_t chk8 = 0;
     while (bytes_written < ebl_size) {
         size_t chunk_len = ebl_size - bytes_written;
-        if (chunk_len > 4096) chunk_len = 4096;
+        if (chunk_len > 512) chunk_len = 512;
 
         if (transport_write(s->transport, ebl_data + bytes_written, chunk_len) != (int)chunk_len) {
             fprintf(stderr, "\n[-] Failed to write EBL stream chunk at offset %zu\n", bytes_written);
@@ -419,6 +422,7 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
         int percent = (int)((bytes_written * 100) / ebl_size);
         printf("\r[*] EBL upload progress: %3d%% (%zu / %zu bytes)", percent, bytes_written, ebl_size);
         fflush(stdout);
+        usleep(100);
     }
     printf("\n[+] EBL payload streamed successfully.\n");
 
