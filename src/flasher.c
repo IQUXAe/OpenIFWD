@@ -746,7 +746,7 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
             uint32_t address;
         } req_addr;
 
-        req_addr.hdr.token = 0x00A4;
+        req_addr.hdr.token = IFWD_MSG_RSP_SET_RAM_ADDR;    /* 0x0207: Expected Response ID */
         req_addr.hdr.msg_type = IFWD_MSG_REQ_SET_RAM_ADDR; /* 0x0201 */
         req_addr.hdr.length = sizeof(uint32_t);            /* 4 bytes */
         req_addr.address = ram_addr;
@@ -790,7 +790,7 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
             if (chunk_len > CHUNK_WRITE_SIZE) chunk_len = CHUNK_WRITE_SIZE;
 
             memset(pkt_buf, 0, sizeof(pkt_buf));
-            data_hdr->token = 0x00A4;
+            data_hdr->token = IFWD_MSG_RSP_WRITE_TO_RAM;    /* 0x0208: Expected Response ID */
             data_hdr->msg_type = IFWD_MSG_REQ_WRITE_TO_RAM; /* 0x0202 */
             data_hdr->length = (uint32_t)chunk_len;
             memcpy(pkt_buf + sizeof(ebl_pkt_hdr_t), data + offset, chunk_len);
@@ -833,7 +833,7 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
             uint32_t entry_addr;
         } req_exec;
 
-        req_exec.hdr.token = 0x00A4;
+        req_exec.hdr.token = IFWD_MSG_RSP_EXEC_FROM_RAM;    /* 0x0209: Expected Response ID */
         req_exec.hdr.msg_type = IFWD_MSG_REQ_EXEC_FROM_RAM; /* 0x0203 */
         req_exec.hdr.length = sizeof(uint32_t);             /* 4 bytes */
         req_exec.entry_addr = ram_addr;
