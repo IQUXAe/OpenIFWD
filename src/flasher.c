@@ -494,7 +494,7 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
 }
 
 /* Helper to transmit an EBL control packet and read its 8-byte ACK + 16KB response buffer (USB V3/V4) */
-static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type, uint16_t token,
+static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type,
                                 const void *payload, uint32_t payload_len,
                                 uint16_t expected_ack, uint32_t *out_status,
                                 uint8_t *out_buffer_16k) {
@@ -506,7 +506,7 @@ static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type, uint16_
     ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_buf;
     hdr->msg_type = msg_type;
     hdr->length = payload_len;
-    hdr->token = (token != 0) ? token : ifwd_calc_ebl_token(msg_type, payload_len, (const uint8_t *)payload);
+    hdr->token = ifwd_calc_ebl_token(msg_type, payload_len, (const uint8_t *)payload);
 
     if (payload && payload_len > 0) {
         size_t copy_sz = (size_t)payload_len;
@@ -514,8 +514,11 @@ static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type, uint16_
         memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), payload, copy_sz);
     }
 
+    printf("  [TX -> EP 0x02] Cmd: %-22s (0x%04X), Token: 0x%04X, Len: %5u b\n",
+           ifwd_msg_name(msg_type), msg_type, hdr->token, payload_len);
+
     if (transport_write(s->transport, tx_buf, sizeof(tx_buf)) != (int)sizeof(tx_buf)) {
-        fprintf(stderr, "[-] Failed to transmit EBL command 0x%04X\n", msg_type);
+        fprintf(stderr, "[-] Failed to transmit EBL command 0x%04X (%s)\n", msg_type, ifwd_msg_name(msg_type));
         return -1;
     }
 
@@ -536,9 +539,18 @@ static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type, uint16_
         return -1;
     }
 
+    printf("  [RX <- EP 0x83] ACK: 0x%04X (%-15s), RspCode: 0x%04X (%-15s), Status: 0x%08X\n",
+           rsp.ack_type, ifwd_msg_name(rsp.ack_type), rsp.msg_type, ifwd_msg_name(rsp.msg_type), rsp.status_len);
+
     if (expected_ack != 0 && rsp.ack_type != expected_ack) {
-        fprintf(stderr, "[-] Unexpected ACK type for 0x%04X (expected 0x%04X, got 0x%04X)\n",
-                msg_type, expected_ack, rsp.ack_type);
+        fprintf(stderr, "[-] ERROR: Target response mismatch for 0x%04X (%s):\n"
+                        "           Expected ACK: 0x%04X (%s)\n"
+                        "           Got ACK:      0x%04X (%s), RspCode: 0x%04X, Status: 0x%08X\n"
+                        "           Raw Bytes:    %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                msg_type, ifwd_msg_name(msg_type),
+                expected_ack, ifwd_msg_name(expected_ack),
+                rsp.ack_type, ifwd_msg_name(rsp.ack_type), rsp.msg_type, rsp.status_len,
+                rsp_p[0], rsp_p[1], rsp_p[2], rsp_p[3], rsp_p[4], rsp_p[5], rsp_p[6], rsp_p[7]);
         return -1;
     }
 
@@ -670,18 +682,18 @@ int flasher_configure_protocol(flasher_session_t *s, const fls_file_t *ref_fls) 
         printf("[+] Drained EBL capabilities buffer (%zu bytes from Bulk IN EP 0x83).\n", cap_recvd);
 
         /* Step 5: CnfBaudChange (Frame 110 in dump)
-         * Token 0x00A4, Msg 0x0082, len 4 (baud: 921600). Total 16392 bytes.
+         * Msg 0x0082, len 4 (baud: 921600). Total 16392 bytes.
          */
         printf("[*] Negotiating EBL high-speed transfer buffer (CnfBaudChange)...\n");
         uint32_t baud_val = 921600;
-        if (ebl_send_control_cmd(s, IFWD_MSG_CNF_BAUD_CHANGE_EBL, 0x00a4, &baud_val, sizeof(baud_val),
+        if (ebl_send_control_cmd(s, IFWD_MSG_CNF_BAUD_CHANGE_EBL, &baud_val, sizeof(baud_val),
                                  IFWD_MSG_CNF_BAUD_CHANGE_EBL, NULL, NULL) != 0) {
             fprintf(stderr, "[-] Failed CnfBaudChange handshake\n");
             return -1;
         }
 
         /* Step 6: ReqFlashId (Frame 113 in dump)
-         * Token 0x1BB5, Msg 0x0801, len 172. Uses Tag 13 (FLS_TAG_PLATFORM_EXT) payload.
+         * Msg 0x0801, len 172. Uses Tag 13 (FLS_TAG_PLATFORM_EXT) payload.
          */
         printf("[*] Querying target Flash ID and Platform Parameters (ReqFlashId)...\n");
         const uint8_t *tag13_payload = NULL;
@@ -692,7 +704,7 @@ int flasher_configure_protocol(flasher_session_t *s, const fls_file_t *ref_fls) 
                 tag13_payload = fls_get_chunk_payload(ref_fls, c13, &tag13_size);
             }
         }
-        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_ID, 0x1bb5, tag13_payload,
+        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_ID, tag13_payload,
                                  (tag13_size > 0 && tag13_size <= 172) ? (uint32_t)tag13_size : 172,
                                  IFWD_MSG_REQ_FLASH_ID, NULL, NULL) != 0) {
             fprintf(stderr, "[-] Failed ReqFlashId handshake\n");
@@ -700,22 +712,22 @@ int flasher_configure_protocol(flasher_session_t *s, const fls_file_t *ref_fls) 
         }
 
         /* Step 7: ReqCfiInfo_1 (Frame 116 in dump)
-         * Token 0x0086, Msg 0x0084, len 2 (0x0000). Target returns 256 bytes CFI in 16KB buffer.
+         * Msg 0x0084, len 2 (0x0000). Target returns 256 bytes CFI in 16KB buffer.
          */
         printf("[*] Requesting Common Flash Interface info (ReqCfiInfo_1)...\n");
         uint16_t cfi_zero = 0;
         uint8_t rx_cfi_buf[EBL_USB_DATA_BLOCK];
-        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_CFI_INFO_1, 0x0086, &cfi_zero, sizeof(cfi_zero),
+        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_CFI_INFO_1, &cfi_zero, sizeof(cfi_zero),
                                  IFWD_MSG_REQ_CFI_INFO_1, NULL, rx_cfi_buf) != 0) {
             fprintf(stderr, "[-] Failed ReqCfiInfo_1 handshake\n");
             return -1;
         }
 
         /* Step 8: ReqCfiInfo_2 (Frame 119 in dump)
-         * Token 0x02A1, Msg 0x0085, len 256 (passes the 256 bytes received from Step 7).
+         * Msg 0x0085, len 256 (passes the 256 bytes received from Step 7).
          */
         printf("[*] Confirming CFI parameters (ReqCfiInfo_2)...\n");
-        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_CFI_INFO_2, 0x02a1, rx_cfi_buf, 256,
+        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_CFI_INFO_2, rx_cfi_buf, 256,
                                  IFWD_MSG_REQ_CFI_INFO_2, NULL, NULL) != 0) {
             fprintf(stderr, "[-] Failed ReqCfiInfo_2 handshake\n");
             return -1;
@@ -803,14 +815,14 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
 
     /* 4. Send ReqSecStart (0x0204) TWICE (exact match to dump frames 122/125, 142/145, 172/175) */
     printf("[*] Sending ReqSecStart (attempt 1/2)...\n");
-    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_START, 0x1a23, tag15_data, 2048,
+    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_START, tag15_data, 2048,
                              IFWD_MSG_REQ_SEC_START, NULL, NULL) != 0) {
         fprintf(stderr, "[-] ReqSecStart (1) failed for %s\n", name);
         return -1;
     }
 
     printf("[*] Sending ReqSecStart (attempt 2/2)...\n");
-    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_START, 0x1a23, tag15_data, 2048,
+    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_START, tag15_data, 2048,
                              IFWD_MSG_REQ_SEC_START, NULL, NULL) != 0) {
         fprintf(stderr, "[-] ReqSecStart (2) failed for %s\n", name);
         return -1;
@@ -823,7 +835,7 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
 
         /* Set Flash Address */
         printf("[*] Setting flash target address to 0x%08X (ReqFlashSetAddress)...\n", target_addr);
-        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_SET_ADDR, 0x080f, &target_addr, sizeof(target_addr),
+        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_SET_ADDR, &target_addr, sizeof(target_addr),
                                  IFWD_MSG_REQ_FLASH_SET_ADDR, NULL, NULL) != 0) {
             fprintf(stderr, "[-] ReqFlashSetAddress failed for 0x%08X in %s\n", target_addr, name);
             return -1;
@@ -887,7 +899,7 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
     /* 6. Send ReqSecEnd (0x0205) (Frame 139 in dump) */
     printf("[*] Finalizing and committing section to flash (ReqSecEnd)...\n");
     uint16_t zero2 = 0;
-    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_END, 0x0207, &zero2, sizeof(zero2),
+    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_END, &zero2, sizeof(zero2),
                              IFWD_MSG_REQ_SEC_END, NULL, NULL) != 0) {
         fprintf(stderr, "[-] ReqSecEnd failed for %s\n", name);
         return -1;
