@@ -732,120 +732,134 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
 
     if (s->config.is_usb) {
         /* USB V3/V4 Ping-Pong Framing:
-         * EBL USB driver expects fixed 2056-byte transfers (8-byte header + 2048-byte buffer).
-         * Sending short packets (< 2056 bytes) leaves the USB DMA transfer incomplete in target hardware.
+         * 1. ReqSetRamWorkAddress (0x0201): strictly 12 bytes (8-byte header + 4-byte address).
+         * 2. ReqWriteToRam (0x0202): fixed 2056-byte blocks (8-byte header + 2048-byte payload).
+         *    Critically: read 8-byte ACK from EP 0x83 after EACH block!
+         * 3. ReqExecuteFromRam (0x0203): strictly 12 bytes (8-byte header + 4-byte entry address).
          */
-        const size_t usb_pkt_len = sizeof(ebl_pkt_hdr_t) + CHUNK_WRITE_SIZE; /* 2056 bytes */
-        uint8_t tx_buf[CHUNK_WRITE_SIZE + sizeof(ebl_pkt_hdr_t)];
 
-        /* 1. Set RAM Work Address (ReqSetRamWorkAddress = 0x0201) */
-        memset(tx_buf, 0, usb_pkt_len);
-        ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_buf;
-        hdr->token = 0x0201;
-        hdr->msg_type = IFWD_MSG_REQ_SET_RAM_ADDR;
-        hdr->length = sizeof(uint32_t);
-        memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), &ram_addr, sizeof(uint32_t));
+        /* --- 1. Set RAM Work Address (STRICTLY 12 BYTES) --- */
+        printf("[*] Sending ReqSetRamWorkAddress (0x%08X, 12 bytes to Bulk OUT EP 0x02)...\n", ram_addr);
 
-        printf("[*] Sending ReqSetRamWorkAddress (0x%08X, %zu bytes to Bulk OUT EP 0x02)...\n", ram_addr, usb_pkt_len);
-        if (transport_write(s->transport, tx_buf, usb_pkt_len) != (int)usb_pkt_len) {
-            fprintf(stderr, "[-] Failed to write ReqSetRamWorkAddress packet\n");
+        struct __attribute__((packed)) {
+            ebl_pkt_hdr_t hdr;
+            uint32_t address;
+        } req_addr;
+
+        req_addr.hdr.token = 0x00A4;
+        req_addr.hdr.msg_type = IFWD_MSG_REQ_SET_RAM_ADDR; /* 0x0201 */
+        req_addr.hdr.length = sizeof(uint32_t);            /* 4 bytes */
+        req_addr.address = ram_addr;
+
+        if (transport_write(s->transport, &req_addr, sizeof(req_addr)) != (int)sizeof(req_addr)) {
+            fprintf(stderr, "[-] Failed to send ReqSetRamWorkAddress\n");
             return -1;
         }
 
+        /* Read 8-byte ACK from EP 0x83 */
         ebl_rsp_prot_conf_t rsp;
         memset(&rsp, 0, sizeof(rsp));
         size_t rsp_recvd = 0;
         uint8_t *rsp_p = (uint8_t *)&rsp;
         while (rsp_recvd < sizeof(rsp)) {
-            int br = transport_read(s->transport, rsp_p + rsp_recvd, sizeof(rsp) - rsp_recvd, 5000);
+            int br = transport_read(s->transport, rsp_p + rsp_recvd, sizeof(rsp) - rsp_recvd, 3000);
             if (br <= 0) break;
             rsp_recvd += br;
         }
 
-        if (rsp_recvd == sizeof(rsp)) {
-            printf("[+] RAM work address acknowledged (msg: 0x%04X, ack: 0x%04X, status: 0x%08X)\n",
+        if (rsp_recvd >= sizeof(rsp)) {
+            printf("[+] ReqSetRamWorkAddress acknowledged! (msg: 0x%04X, ack: 0x%04X, status: 0x%08X)\n",
                    rsp.msg_type, rsp.ack_type, rsp.status_len);
-            if (rsp.status_len > 0 && rsp.status_len <= 4096) {
-                uint8_t drain[4096];
-                transport_read(s->transport, drain, rsp.status_len, 1000);
+            if (rsp.ack_type != IFWD_MSG_REQ_SET_RAM_ADDR) {
+                fprintf(stderr, "[-] Warning: unexpected ACK type (expected 0x%04X, got 0x%04X)\n",
+                        IFWD_MSG_REQ_SET_RAM_ADDR, rsp.ack_type);
             }
         } else {
-            fprintf(stderr, "[-] Timeout waiting for ReqSetRamWorkAddress ACK from EP 0x83 (received %zu / %zu bytes)\n",
-                    rsp_recvd, sizeof(rsp));
+            fprintf(stderr, "[-] Timeout waiting for ReqSetRamWorkAddress ACK from EP 0x83\n");
             return -1;
         }
 
-        /* 2. Write data to RAM in chunks (ReqWriteToRam = 0x0202) */
-        size_t bytes_written = 0;
-        while (bytes_written < size) {
-            size_t chunk_len = size - bytes_written;
+        /* --- 2. Write data to RAM in chunks (PACKETS OF 2056 BYTES) --- */
+        const size_t usb_pkt_len = sizeof(ebl_pkt_hdr_t) + CHUNK_WRITE_SIZE; /* 2056 bytes */
+        uint8_t pkt_buf[CHUNK_WRITE_SIZE + sizeof(ebl_pkt_hdr_t)];
+        ebl_pkt_hdr_t *data_hdr = (ebl_pkt_hdr_t *)pkt_buf;
+
+        size_t offset = 0;
+        while (offset < size) {
+            size_t chunk_len = size - offset;
             if (chunk_len > CHUNK_WRITE_SIZE) chunk_len = CHUNK_WRITE_SIZE;
 
-            memset(tx_buf, 0, usb_pkt_len);
-            ebl_pkt_hdr_t *w_hdr = (ebl_pkt_hdr_t *)tx_buf;
-            w_hdr->token = 0x0202;
-            w_hdr->msg_type = IFWD_MSG_REQ_WRITE_TO_RAM;
-            w_hdr->length = (uint32_t)chunk_len;
-            memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), data + bytes_written, chunk_len);
+            memset(pkt_buf, 0, sizeof(pkt_buf));
+            data_hdr->token = 0x00A4;
+            data_hdr->msg_type = IFWD_MSG_REQ_WRITE_TO_RAM; /* 0x0202 */
+            data_hdr->length = (uint32_t)chunk_len;
+            memcpy(pkt_buf + sizeof(ebl_pkt_hdr_t), data + offset, chunk_len);
 
-            if (transport_write(s->transport, tx_buf, usb_pkt_len) != (int)usb_pkt_len) {
-                fprintf(stderr, "\n[-] Failed to write RAM block at offset %zu\n", bytes_written);
+            /* Send 2056-byte block to EP 0x02 */
+            if (transport_write(s->transport, pkt_buf, usb_pkt_len) != (int)usb_pkt_len) {
+                fprintf(stderr, "\n[-] Failed to write RAM block at offset %zu\n", offset);
                 return -1;
             }
 
-            /* Read ACK (Ping-Pong: EBL requires reading ACK before accepting next OUT block) */
+            /* Read 8-byte ACK from EP 0x83 after each block (Ping-Pong) */
             ebl_rsp_prot_conf_t w_rsp;
             memset(&w_rsp, 0, sizeof(w_rsp));
             size_t w_recvd = 0;
             uint8_t *w_p = (uint8_t *)&w_rsp;
             while (w_recvd < sizeof(w_rsp)) {
-                int br = transport_read(s->transport, w_p + w_recvd, sizeof(w_rsp) - w_recvd, 5000);
+                int br = transport_read(s->transport, w_p + w_recvd, sizeof(w_rsp) - w_recvd, 3000);
                 if (br <= 0) break;
                 w_recvd += br;
             }
 
-            if (w_recvd != sizeof(w_rsp)) {
+            if (w_recvd < sizeof(w_rsp)) {
                 fprintf(stderr, "\n[-] Timeout waiting for ReqWriteToRam ACK at offset %zu (received %zu / %zu bytes)\n",
-                        bytes_written, w_recvd, sizeof(w_rsp));
+                        offset, w_recvd, sizeof(w_rsp));
                 return -1;
             }
-            if (w_rsp.status_len > 0 && w_rsp.status_len <= 4096) {
-                uint8_t drain[4096];
-                transport_read(s->transport, drain, w_rsp.status_len, 1000);
-            }
 
-            bytes_written += chunk_len;
-            int percent = (int)((bytes_written * 100) / size);
-            printf("\r[*] Uploading to RAM: %d%% (%zu / %zu bytes)", percent, bytes_written, size);
+            offset += chunk_len;
+            int percent = (int)((offset * 100) / size);
+            printf("\r[*] Uploading to RAM: %d%% (%zu / %zu bytes)", percent, offset, size);
             fflush(stdout);
         }
         printf("\n[+] Binary uploaded to RAM successfully!\n");
 
-        /* 3. Execute from RAM (ReqExecuteFromRam = 0x0203) */
-        printf("[*] Executing code from RAM at 0x%08X (ReqExecuteFromRam)...\n", ram_addr);
-        memset(tx_buf, 0, usb_pkt_len);
-        ebl_pkt_hdr_t *e_hdr = (ebl_pkt_hdr_t *)tx_buf;
-        e_hdr->token = 0x0203;
-        e_hdr->msg_type = IFWD_MSG_REQ_EXEC_FROM_RAM;
-        e_hdr->length = sizeof(uint32_t);
-        memcpy(tx_buf + sizeof(ebl_pkt_hdr_t), &ram_addr, sizeof(uint32_t));
+        /* --- 3. Execute from RAM (STRICTLY 12 BYTES) --- */
+        printf("[*] Sending ReqExecuteFromRam (Entry: 0x%08X, 12 bytes to Bulk OUT EP 0x02)...\n", ram_addr);
 
-        if (transport_write(s->transport, tx_buf, usb_pkt_len) != (int)usb_pkt_len) {
+        struct __attribute__((packed)) {
+            ebl_pkt_hdr_t hdr;
+            uint32_t entry_addr;
+        } req_exec;
+
+        req_exec.hdr.token = 0x00A4;
+        req_exec.hdr.msg_type = IFWD_MSG_REQ_EXEC_FROM_RAM; /* 0x0203 */
+        req_exec.hdr.length = sizeof(uint32_t);             /* 4 bytes */
+        req_exec.entry_addr = ram_addr;
+
+        if (transport_write(s->transport, &req_exec, sizeof(req_exec)) != (int)sizeof(req_exec)) {
             fprintf(stderr, "[-] Failed to send ReqExecuteFromRam command\n");
             return -1;
         }
 
+        /* Read final execution ACK from EP 0x83 */
         ebl_rsp_prot_conf_t e_rsp;
         memset(&e_rsp, 0, sizeof(e_rsp));
         size_t e_recvd = 0;
         uint8_t *e_p = (uint8_t *)&e_rsp;
         while (e_recvd < sizeof(e_rsp)) {
-            int br = transport_read(s->transport, e_p + e_recvd, sizeof(e_rsp) - e_recvd, 3000);
+            int br = transport_read(s->transport, e_p + e_recvd, sizeof(e_rsp) - e_recvd, 2000);
             if (br <= 0) break;
             e_recvd += br;
         }
 
-        printf("[+] Execution command sent! Target is running payload from RAM.\n");
+        if (e_recvd >= sizeof(e_rsp)) {
+            printf("[+] ReqExecuteFromRam acknowledged! (msg: 0x%04X, ack: 0x%04X, status: 0x%08X)\n",
+                   e_rsp.msg_type, e_rsp.ack_type, e_rsp.status_len);
+        }
+
+        printf("[+] RAM execution command dispatched successfully! Target is running payload from RAM.\n");
         return 0;
     } else {
         /* UART legacy framing fallback */
