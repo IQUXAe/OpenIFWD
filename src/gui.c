@@ -269,7 +269,7 @@ static void *worker_flash_thread(void *arg) {
     }
 
     gui_set_progress_async(0.50, "Configuring protocol...");
-    flasher_configure_protocol(s);
+    flasher_configure_protocol(s, NULL);
     flasher_query_flash_id(s);
 
     if (cfg->erase_all) {

@@ -22,11 +22,18 @@ const char *ifwd_msg_name(uint16_t msg_type) {
         case IFWD_MSG_CNF_BAUD_CHANGE:     return "CnfBaudChange";
         case IFWD_MSG_ERR_WRONG_BAUDRATE:  return "ErrWrongBaudrate";
         case IFWD_MSG_REQ_SET_PROT_CONF:   return "ReqSetProtConf";
+        case IFWD_MSG_REQ_CFI_INFO_1:      return "ReqCfiInfo_1";
+        case IFWD_MSG_REQ_CFI_INFO_2:      return "ReqCfiInfo_2";
         case IFWD_MSG_REQ_SET_RAM_ADDR:    return "ReqSetRamWorkAddress";
         case IFWD_MSG_REQ_WRITE_TO_RAM:    return "ReqWriteToRam";
         case IFWD_MSG_REQ_EXEC_FROM_RAM:   return "ReqExecuteFromRam";
+        case IFWD_MSG_REQ_SEC_START:       return "ReqSecStart";
+        case IFWD_MSG_REQ_SEC_END:         return "ReqSecEnd";
         case IFWD_MSG_REQ_BOOTLOADER_VER:  return "ReqBootloaderVer";
         case IFWD_MSG_REQ_FORCE_HW_RESET:  return "ReqForceHwReset";
+        case IFWD_MSG_RSP_SEC_END:         return "RspSecEnd";
+        case IFWD_MSG_RSP_CFI_INFO_1:      return "RspCfiInfo_1";
+        case IFWD_MSG_RSP_CFI_INFO_2:      return "RspCfiInfo_2";
         case IFWD_MSG_REQ_FLASH_ID:        return "ReqFlashId";
         case IFWD_MSG_REQ_FLASH_SET_ADDR:  return "ReqFlashSetAddress";
         case IFWD_MSG_REQ_FLASH_READ_BLK:  return "ReqFlashReadBlock";

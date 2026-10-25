@@ -34,15 +34,24 @@ extern "C" {
 #define IFWD_MSG_REQ_RETRANSMISSION  0x0080
 #define IFWD_MSG_CNF_BAUD_CHANGE     0x0081
 #define IFWD_MSG_ERR_WRONG_BAUDRATE  0x0082
+#define IFWD_MSG_CNF_BAUD_CHANGE_EBL 0x0082
+#define IFWD_MSG_REQ_CFI_INFO_1      0x0084
+#define IFWD_MSG_REQ_CFI_INFO_2      0x0085
 #define IFWD_MSG_REQ_SET_PROT_CONF   0x0086
+#define IFWD_MSG_RSP_CFI_INFO_2      0x0285
+#define IFWD_MSG_RSP_CFI_INFO_1      0x02A0
 
-/* Service, RAM execution and reset */
+/* Service, RAM execution, sections and reset */
 #define IFWD_MSG_REQ_SET_RAM_ADDR    0x0201
 #define IFWD_MSG_REQ_WRITE_TO_RAM    0x0202
 #define IFWD_MSG_REQ_EXEC_FROM_RAM   0x0203
+#define IFWD_MSG_REQ_SEC_START       0x0204
+#define IFWD_MSG_REQ_SEC_END         0x0205
 #define IFWD_MSG_RSP_SET_RAM_ADDR    0x0207
+#define IFWD_MSG_RSP_SEC_START       0x0207
 #define IFWD_MSG_RSP_WRITE_TO_RAM    0x0208
 #define IFWD_MSG_RSP_EXEC_FROM_RAM   0x0209
+#define IFWD_MSG_RSP_SEC_END         0x020A
 #define IFWD_MSG_REQ_BOOTLOADER_VER  0x0207
 #define IFWD_MSG_REQ_FORCE_HW_RESET  0x0208
 
@@ -50,10 +59,16 @@ extern "C" {
 #define IFWD_MSG_REQ_FLASH_ID        0x0801
 #define IFWD_MSG_REQ_FLASH_SET_ADDR  0x0802
 #define IFWD_MSG_REQ_FLASH_READ_BLK  0x0803
+#define IFWD_MSG_RSP_FLASH_ID        0x0803
 #define IFWD_MSG_REQ_FLASH_WRITE_BLK 0x0804
+#define IFWD_MSG_RSP_FLASH_SET_ADDR  0x0804
 #define IFWD_MSG_REQ_FLASH_ERASE_START 0x0805
 #define IFWD_MSG_REQ_FLASH_ERASE_CHECK 0x0806
 #define IFWD_MSG_REQ_FLASH_READ_CHK  0x0807
+
+/* High-speed USB buffer sizes (V3/V4 EBL protocol) */
+#define EBL_USB_DATA_BLOCK           16384
+#define EBL_USB_PACKET_SIZE          16392  /* sizeof(ebl_pkt_hdr_t) (8) + EBL_USB_DATA_BLOCK (16384) */
 
 /* Status codes */
 #define IFWD_STATUS_OK               0x00
@@ -151,6 +166,17 @@ typedef struct __attribute__((packed)) {
     uint8_t  status;
     uint32_t erase_addr;
 } ifwd_rsp_erase_check_t;
+
+/* Tag 15 (FLS_TAG_SEC_CFG) partition trailer descriptor (Frame 122 / 142 / 172) */
+#define FLS_SEC_CFG_MAGIC            0x01FEDABE
+
+typedef struct __attribute__((packed)) {
+    uint32_t load_address;    /* Flash load address (e.g. 0x00090000, 0x60000000, 0x63200000) */
+    uint32_t partition_size;  /* Partition size in flash */
+    uint32_t image_size;      /* Actual valid image byte size */
+    uint32_t flags;           /* Reserved / flags */
+} fls_sec_cfg_entry_t;
+_Static_assert(sizeof(fls_sec_cfg_entry_t) == 16, "fls_sec_cfg_entry_t must be 16 bytes");
 
 #pragma pack(pop)
 

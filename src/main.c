@@ -10,6 +10,63 @@
 #include <string.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <dirent.h>
+
+static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_slb, char *auto_bsy, char *auto_cds, char *auto_dffs, size_t buf_sz) {
+    if (!cfg || !cfg->psi_path) return;
+
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s", cfg->psi_path);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+    } else {
+        snprintf(dir, sizeof(dir), ".");
+    }
+
+    DIR *d = opendir(dir);
+    if (!d) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        const char *name = entry->d_name;
+        size_t len = strlen(name);
+        if (len < 4) continue;
+
+        /* Match SLB */
+        if (!cfg->slb_path && (strstr(name, "slb") || strstr(name, "SLB")) && strcmp(name + len - 4, ".fls") == 0) {
+            if (snprintf(auto_slb, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_slb, R_OK) == 0) {
+                cfg->slb_path = auto_slb;
+                printf("[*] Auto-detected Secondary Loader (SLB): %s\n", cfg->slb_path);
+            }
+        }
+
+        /* Match BSY */
+        if (!cfg->bsy_path && (strstr(name, "bsy") || strstr(name, "BSY")) && strcmp(name + len - 4, ".fls") == 0) {
+            if (snprintf(auto_bsy, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_bsy, R_OK) == 0) {
+                cfg->bsy_path = auto_bsy;
+                printf("[*] Auto-detected Baseband System (BSY): %s\n", cfg->bsy_path);
+            }
+        }
+
+        /* Match CDS */
+        if (!cfg->cds_path && (strstr(name, "cds") || strstr(name, "CDS")) && strcmp(name + len - 4, ".fls") == 0) {
+            if (snprintf(auto_cds, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_cds, R_OK) == 0) {
+                cfg->cds_path = auto_cds;
+                printf("[*] Auto-detected Customer Data (CDS): %s\n", cfg->cds_path);
+            }
+        }
+
+        /* Match CSC / DFFS */
+        if (!cfg->dffs_path && (strstr(name, "csc") || strstr(name, "CSC") || (len >= 5 && strcmp(name + len - 5, ".dffs") == 0))) {
+            if (snprintf(auto_dffs, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_dffs, R_OK) == 0) {
+                cfg->dffs_path = auto_dffs;
+                printf("[*] Auto-detected Customization / DFFS (CSC): %s\n", cfg->dffs_path);
+            }
+        }
+    }
+    closedir(d);
+}
 
 static void print_usage(const char *prog) {
     printf("====================================================================\n");
@@ -251,7 +308,7 @@ int main(int argc, char **argv) {
             fls_close(psi);
         }
 
-        if (flasher_configure_protocol(s) != 0) {
+        if (flasher_configure_protocol(s, NULL) != 0) {
             fprintf(stderr, "[-] Protocol configuration failed\n");
             flasher_destroy(s);
             transport_destroy(trans);
@@ -311,6 +368,12 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[-] Error: Serial port is required (-p /dev/ttyACM0 or -p usb)\n");
             return 1;
         }
+
+        char auto_slb[1024] = {0};
+        char auto_bsy[1024] = {0};
+        char auto_cds[1024] = {0};
+        char auto_dffs[1024] = {0};
+        auto_detect_firmware_files(&cfg, auto_slb, auto_bsy, auto_cds, auto_dffs, sizeof(auto_slb));
 
         cfg.is_usb = (strcmp(port, "usb") == 0);
 

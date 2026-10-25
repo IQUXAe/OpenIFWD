@@ -200,6 +200,56 @@ static void test_embedded_psi(void) {
     printf("[TEST] Embedded PSI test PASSED!\n");
 }
 
+static void test_flash_sections(void) {
+    printf("[TEST] Testing stock firmware components (Tag 15 partitions & Tag 12 chunks)...\n");
+
+    /* 1. Test BSY */
+    fls_file_t *bsy = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_BSY.fls");
+    if (bsy) {
+        fls_sec_cfg_entry_t entries[8];
+        size_t count = 0;
+        assert(fls_get_sec_cfg_entries(bsy, entries, 8, &count) == 0);
+        assert(count == 2);
+        assert(entries[0].load_address == 0x63200000);
+        assert(entries[1].load_address == 0x66000000);
+
+        const fls_chunk_info_t *t12[8];
+        size_t t12_cnt = fls_find_all_chunks(bsy, FLS_TAG_IMAGE_DATA, t12, 8);
+        assert(t12_cnt == 2);
+        printf("[+] BSY validated: 2 partitions (0x%08X, 0x%08X), 2 image chunks\n",
+               entries[0].load_address, entries[1].load_address);
+        fls_close(bsy);
+    }
+
+    /* 2. Test CDS */
+    fls_file_t *cds = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_CDS.fls");
+    if (cds) {
+        fls_sec_cfg_entry_t entries[8];
+        size_t count = 0;
+        assert(fls_get_sec_cfg_entries(cds, entries, 8, &count) == 0);
+        assert(count == 1);
+        assert(entries[0].load_address == 0x63F60000);
+        printf("[+] CDS validated: partition 0x%08X (size %u bytes)\n",
+               entries[0].load_address, entries[0].image_size);
+        fls_close(cds);
+    }
+
+    /* 3. Test CSC / DFFS */
+    fls_file_t *csc = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222OXEMJ1_CSC.dffs");
+    if (csc) {
+        fls_sec_cfg_entry_t entries[8];
+        size_t count = 0;
+        assert(fls_get_sec_cfg_entries(csc, entries, 8, &count) == 0);
+        assert(count == 1);
+        assert(entries[0].load_address == 0x44160000);
+        printf("[+] CSC / DFFS validated: NAND partition 0x%08X (size %u bytes)\n",
+               entries[0].load_address, entries[0].image_size);
+        fls_close(csc);
+    }
+
+    printf("[TEST] Stock firmware components PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running Unit Tests ===\n");
     test_protocol_packets();
@@ -213,6 +263,7 @@ int main(int argc, char **argv) {
     test_fls_parsing("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_slb.fls");
 
     test_firmware_structure();
+    test_flash_sections();
 
     printf("=== All Tests Passed Successfully! ===\n");
     return 0;

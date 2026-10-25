@@ -157,11 +157,51 @@ const fls_chunk_info_t *fls_find_chunk(const fls_file_t *fls, uint32_t tag) {
     return NULL;
 }
 
+size_t fls_find_all_chunks(const fls_file_t *fls, uint32_t tag, const fls_chunk_info_t **out_chunks, size_t max_chunks) {
+    if (!fls || !out_chunks || max_chunks == 0) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < fls->chunk_count && count < max_chunks; i++) {
+        if (fls->chunks[i].tag == tag) {
+            out_chunks[count++] = &fls->chunks[i];
+        }
+    }
+    return count;
+}
+
 const uint8_t *fls_get_chunk_payload(const fls_file_t *fls, const fls_chunk_info_t *chunk, size_t *out_size) {
     if (!fls || !chunk) return NULL;
     if (chunk->payload_off + chunk->payload_size > fls->raw_size) return NULL;
     if (out_size) *out_size = chunk->payload_size;
     return fls->raw_data + chunk->payload_off;
+}
+
+int fls_get_sec_cfg_entries(const fls_file_t *fls, fls_sec_cfg_entry_t *out_entries, size_t max_entries, size_t *out_count) {
+    if (!fls || !out_entries || max_entries == 0) return -1;
+    const fls_chunk_info_t *sec_chunk = fls_find_chunk(fls, FLS_TAG_SEC_CFG);
+    if (!sec_chunk) return -1;
+
+    size_t sec_size = 0;
+    const uint8_t *sec_payload = fls_get_chunk_payload(fls, sec_chunk, &sec_size);
+    if (!sec_payload || sec_size < 1932) return -1;
+
+    uint32_t magic = *(const uint32_t *)(sec_payload + 1916);
+    if (magic != FLS_SEC_CFG_MAGIC) {
+        return -2;
+    }
+
+    size_t count = 0;
+    size_t off = 1920;
+    while (off + sizeof(fls_sec_cfg_entry_t) <= sec_size && count < max_entries) {
+        const fls_sec_cfg_entry_t *src = (const fls_sec_cfg_entry_t *)(sec_payload + off);
+        if (src->load_address == 0 && src->image_size == 0) {
+            break;
+        }
+        out_entries[count++] = *src;
+        off += sizeof(fls_sec_cfg_entry_t);
+    }
+
+    if (out_count) *out_count = count;
+    return 0;
 }
 
 void fls_print_info(const fls_file_t *fls) {
