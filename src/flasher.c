@@ -494,11 +494,11 @@ int flasher_upload_ebl(flasher_session_t *s, const fls_file_t *ebl_fls) {
     return 0;
 }
 
-/* Helper to transmit an EBL control packet and read its 8-byte ACK + 16KB response buffer (USB V3/V4) */
-static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type,
-                                const void *payload, uint32_t payload_len,
-                                uint16_t expected_ack, uint32_t *out_status,
-                                uint8_t *out_buffer_16k) {
+/* Helper to transmit an EBL control packet and read its 8-byte ACK + response buffer */
+static int ebl_send_control_cmd_ext(flasher_session_t *s, uint16_t msg_type,
+                                    const void *payload, uint32_t payload_len,
+                                    uint16_t expected_ack, uint32_t *out_status,
+                                    uint8_t *out_buffer, size_t out_len) {
     if (!s || !s->transport) return -1;
 
     uint8_t tx_buf[EBL_USB_PACKET_SIZE];
@@ -543,7 +543,11 @@ static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type,
     printf("  [RX <- EP 0x83] ACK: 0x%04X (%-15s), RspCode: 0x%04X (%-15s), Status: 0x%08X\n",
            rsp.ack_type, ifwd_msg_name(rsp.ack_type), rsp.msg_type, ifwd_msg_name(rsp.msg_type), rsp.status_len);
 
-    if (expected_ack != 0 && rsp.ack_type != expected_ack) {
+    bool ack_ok = (expected_ack == 0 || rsp.ack_type == expected_ack ||
+                   (expected_ack == IFWD_MSG_REQ_FLASH_READ_BLK &&
+                    (rsp.msg_type == IFWD_MSG_RSP_FLASH_READ_BLK || rsp.ack_type == IFWD_MSG_REQ_FLASH_READ_BLK)));
+
+    if (!ack_ok) {
         fprintf(stderr, "[-] ERROR: Target response mismatch for 0x%04X (%s):\n"
                         "           Expected ACK: 0x%04X (%s)\n"
                         "           Got ACK:      0x%04X (%s), RspCode: 0x%04X, Status: 0x%08X\n"
@@ -559,20 +563,30 @@ static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type,
         *out_status = rsp.status_len;
     }
 
-    /* Read 16384-byte buffer from EP 0x83 */
-    uint8_t rx_16k[EBL_USB_DATA_BLOCK];
-    size_t data_recvd = 0;
-    while (data_recvd < sizeof(rx_16k)) {
-        int br = transport_read(s->transport, rx_16k + data_recvd, sizeof(rx_16k) - data_recvd, 10000);
-        if (br <= 0) break;
-        data_recvd += br;
-    }
-
-    if (out_buffer_16k) {
-        memcpy(out_buffer_16k, rx_16k, sizeof(rx_16k));
+    /* Read payload from EP 0x83 only if requested */
+    if (out_buffer && out_len > 0) {
+        size_t data_recvd = 0;
+        while (data_recvd < out_len) {
+            int br = transport_read(s->transport, out_buffer + data_recvd, out_len - data_recvd, 10000);
+            if (br <= 0) break;
+            data_recvd += br;
+        }
+        if (data_recvd < out_len) {
+            fprintf(stderr, "[-] Short read on EP 0x83 data payload (got %zu / %zu bytes)\n", data_recvd, out_len);
+            return -1;
+        }
     }
 
     return 0;
+}
+
+static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type,
+                                const void *payload, uint32_t payload_len,
+                                uint16_t expected_ack, uint32_t *out_status,
+                                uint8_t *out_buffer_16k) {
+    return ebl_send_control_cmd_ext(s, msg_type, payload, payload_len,
+                                    expected_ack, out_status,
+                                    out_buffer_16k, out_buffer_16k ? EBL_USB_DATA_BLOCK : 0);
 }
 
 int flasher_configure_protocol(flasher_session_t *s, const fls_file_t *ref_fls) {
@@ -1262,6 +1276,42 @@ int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
         fls_close(psi);
         return -1;
     }
+
+    /* 5. Open OneNAND section using Tag 15 from SLB */
+    const fls_chunk_info_t *tag15 = fls_find_chunk(slb, FLS_TAG_SEC_CFG);
+    if (!tag15) {
+        fprintf(stderr, "[-] No Tag 15 SEC_CFG in SLB\n");
+        fls_close(slb);
+        fls_close(psi);
+        return -1;
+    }
+    size_t tag15_len = 0;
+    const uint8_t *tag15_data = fls_get_chunk_payload(slb, tag15, &tag15_len);
+    if (!tag15_data || tag15_len < 2048) {
+        fprintf(stderr, "[-] Invalid Tag 15 payload in SLB\n");
+        fls_close(slb);
+        fls_close(psi);
+        return -1;
+    }
+
+    printf("[*] Opening flash section for OneNAND / NVRAM (ReqSecStart 1/2)...\n");
+    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_START, tag15_data, 2048,
+                             IFWD_MSG_REQ_SEC_START, NULL, NULL) != 0) {
+        fprintf(stderr, "[-] ReqSecStart (1) failed for NVRAM dump\n");
+        fls_close(slb);
+        fls_close(psi);
+        return -1;
+    }
+
+    printf("[*] Opening flash section for OneNAND / NVRAM (ReqSecStart 2/2)...\n");
+    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_START, tag15_data, 2048,
+                             IFWD_MSG_REQ_SEC_START, NULL, NULL) != 0) {
+        fprintf(stderr, "[-] ReqSecStart (2) failed for NVRAM dump\n");
+        fls_close(slb);
+        fls_close(psi);
+        return -1;
+    }
+
     fls_close(slb);
     fls_close(psi);
 
@@ -1283,36 +1333,42 @@ int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
         return -1;
     }
 
-    printf("[*] Reading NVRAM flash blocks (16 KB chunks)...\n");
-    uint8_t rx_buf_16k[EBL_USB_DATA_BLOCK];
+    #define NVRAM_DUMP_CHUNK 2048
+    printf("[*] Reading NVRAM flash blocks (%d byte chunks)...\n", NVRAM_DUMP_CHUNK);
+    uint8_t rx_chunk[NVRAM_DUMP_CHUNK];
 
     while (dumped < total_size) {
-        uint16_t req_len = (uint16_t)EBL_USB_DATA_BLOCK;
+        uint16_t req_len = (uint16_t)NVRAM_DUMP_CHUNK;
         uint32_t status = 0;
 
         /* ReqFlashReadBlock (0x0803) */
-        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_READ_BLK, &req_len, sizeof(req_len),
-                                 IFWD_MSG_REQ_FLASH_READ_BLK, &status, rx_buf_16k) != 0) {
+        if (ebl_send_control_cmd_ext(s, IFWD_MSG_REQ_FLASH_READ_BLK, &req_len, sizeof(req_len),
+                                     IFWD_MSG_REQ_FLASH_READ_BLK, &status, rx_chunk, sizeof(rx_chunk)) != 0) {
             fprintf(stderr, "\n[-] ReqFlashReadBlock failed at offset %zu (addr 0x%08X)\n",
                     dumped, start_addr + (uint32_t)dumped);
             break;
         }
 
-        size_t written = fwrite(rx_buf_16k, 1, sizeof(rx_buf_16k), fout);
-        if (written != sizeof(rx_buf_16k)) {
+        size_t written = fwrite(rx_chunk, 1, sizeof(rx_chunk), fout);
+        if (written != sizeof(rx_chunk)) {
             fprintf(stderr, "\n[-] Failed to write to %s: %s\n", out_path, strerror(errno));
             break;
         }
 
-        dumped += sizeof(rx_buf_16k);
+        dumped += sizeof(rx_chunk);
         int percent = (int)((dumped * 100) / total_size);
         printf("\r[*] Dumping NVRAM / IMEI: %3d%% (%zu / %zu bytes)", percent, dumped, total_size);
         fflush(stdout);
-        usleep(10000);
+        usleep(5000);
     }
 
     fclose(fout);
     printf("\n[+] NVRAM Dump complete! %zu bytes saved to %s\n", dumped, out_path);
+
+    /* Close section with ReqSecEnd (0x0205) */
+    uint16_t zero2 = 0;
+    ebl_send_control_cmd(s, IFWD_MSG_REQ_SEC_END, &zero2, sizeof(zero2),
+                         IFWD_MSG_REQ_SEC_END, NULL, NULL);
 
     /* Reboot */
     flasher_reboot(s);
@@ -1323,13 +1379,19 @@ int flasher_reboot(flasher_session_t *s) {
     if (!s) return -1;
     printf("\n[*] Resetting target device (ReqForceHwReset)...\n");
 
+    /* Drain any leftover bytes on EP 0x83 */
+    if (s->config.is_usb && s->transport) {
+        uint8_t drain[512];
+        while (transport_read(s->transport, drain, sizeof(drain), 50) > 0);
+    }
+
     /* ResetMode=1 (Hardware Watchdog Reset), Resetp1=16 (0x10), Resetp2=17 (0x11), Resetp3=0 */
     uint8_t reset_payload[4] = { 0x01, 0x10, 0x11, 0x00 };
 
     if (s->config.is_usb) {
         printf("  [TX -> EP 0x02] Sending ReqForceHwReset with ResetMode=1 (Hardware Reset)...\n");
         ebl_send_control_cmd(s, IFWD_MSG_REQ_FORCE_HW_RESET, reset_payload, sizeof(reset_payload),
-                             IFWD_MSG_REQ_FORCE_HW_RESET, NULL, NULL);
+                             0, NULL, NULL);
         printf("[+] Reboot command sent. Target is resetting hardware and starting StarOS!\n");
         return 0;
     } else {

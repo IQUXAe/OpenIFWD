@@ -37,6 +37,7 @@ const char *ifwd_msg_name(uint16_t msg_type) {
         case IFWD_MSG_REQ_FLASH_ID:        return "ReqFlashId";
         case IFWD_MSG_REQ_FLASH_SET_ADDR:  return "ReqFlashSetAddress";
         case IFWD_MSG_REQ_FLASH_READ_BLK:  return "ReqFlashReadBlock";
+        case IFWD_MSG_RSP_FLASH_READ_BLK:  return "RspFlashReadBlock";
         case IFWD_MSG_REQ_FLASH_WRITE_BLK: return "ReqFlashWriteBlock";
         case IFWD_MSG_REQ_FLASH_ERASE_START: return "ReqFlashEraseStart";
         case IFWD_MSG_REQ_FLASH_ERASE_CHECK: return "ReqFlashEraseCheck";
