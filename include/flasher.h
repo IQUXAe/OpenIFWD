@@ -44,6 +44,12 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
 int flasher_flash_image(flasher_session_t *s, const uint8_t *data, size_t size, uint32_t flash_addr);
 int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *data, size_t size);
 int flasher_verify_checksum(flasher_session_t *s, uint32_t start_addr, uint32_t length, uint16_t expected_chk);
+/* NVRAM / EEPROM Protected Range (IMEI, RF Calibration, Board ID) */
+#define NVRAM_PROTECT_START          0x60080000
+#define NVRAM_PROTECT_END            0x60180000
+#define NVRAM_PROTECT_SIZE           0x00100000  /* 1 MB */
+
+int flasher_dump_nvram(flasher_session_t *s, const char *out_path);
 int flasher_reboot(flasher_session_t *s);
 
 /* Complete flashing sequence */

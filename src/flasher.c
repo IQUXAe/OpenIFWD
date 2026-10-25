@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 
 #define CHUNK_WRITE_SIZE 2048
 
@@ -833,6 +834,13 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
         uint32_t target_addr = entries[p].load_address;
         uint32_t expected_size = entries[p].image_size;
 
+        /* Hardware NVRAM / IMEI Protection (0x60080000 - 0x60180000) */
+        if (target_addr >= NVRAM_PROTECT_START && target_addr < NVRAM_PROTECT_END) {
+            fprintf(stderr, "\n[FATAL] REFUSING TO WRITE: Address 0x%08X is within protected NVRAM/IMEI area (0x%08X-0x%08X)!\n",
+                    target_addr, (unsigned int)NVRAM_PROTECT_START, (unsigned int)NVRAM_PROTECT_END);
+            return -1;
+        }
+
         /* Set Flash Address */
         printf("[*] Setting flash target address to 0x%08X (ReqFlashSetAddress)...\n", target_addr);
         if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_SET_ADDR, &target_addr, sizeof(target_addr),
@@ -922,6 +930,15 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
 }
 
 int flasher_erase_flash(flasher_session_t *s, uint32_t start_addr, uint32_t end_addr) {
+    /* Safety Guard: Refuse any erase overlapping NVRAM / IMEI (0x60080000 - 0x60180000) */
+    if ((start_addr >= NVRAM_PROTECT_START && start_addr < NVRAM_PROTECT_END) ||
+        (end_addr > NVRAM_PROTECT_START && end_addr <= NVRAM_PROTECT_END) ||
+        (start_addr <= NVRAM_PROTECT_START && end_addr >= NVRAM_PROTECT_END)) {
+        fprintf(stderr, "\n[FATAL] REFUSING TO ERASE: Range 0x%08X-0x%08X overlaps protected NVRAM/IMEI area (0x%08X-0x%08X)!\n",
+                start_addr, end_addr, (unsigned int)NVRAM_PROTECT_START, (unsigned int)NVRAM_PROTECT_END);
+        return -1;
+    }
+
     printf("[*] Erasing flash region: 0x%08X - 0x%08X...\n", start_addr, end_addr);
 
     ifwd_req_erase_start_t erase_req;
@@ -1197,6 +1214,111 @@ int flasher_verify_checksum(flasher_session_t *s, uint32_t start_addr, uint32_t 
     return 0;
 }
 
+int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
+    if (!s || !out_path) return -1;
+
+    printf("\n================================================================================\n");
+    printf("[*] Starting Safe NVRAM / EEPROM (IMEI & Calibration) Backup\n");
+    printf("[*] Memory Range: 0x%08X - 0x%08X (%u bytes / 1 MB)\n",
+           (unsigned int)NVRAM_PROTECT_START, (unsigned int)NVRAM_PROTECT_END, (unsigned int)NVRAM_PROTECT_SIZE);
+    printf("[*] Output File:  %s\n", out_path);
+    printf("================================================================================\n");
+
+    /* 1. Sync handshake with Boot ROM */
+    if (flasher_sync(s, 45) != 0) return -1;
+
+    /* 2. Upload PSI */
+    if (!s->config.psi_path) {
+        fprintf(stderr, "[-] PSI file is required for EBL boot\n");
+        return -1;
+    }
+    fls_file_t *psi = fls_open(s->config.psi_path);
+    if (!psi) return -1;
+    if (flasher_upload_psi(s, psi) != 0) {
+        fls_close(psi);
+        return -1;
+    }
+
+    /* 3. Upload SLB / EBL */
+    if (!s->config.slb_path) {
+        fprintf(stderr, "[-] SLB (EBL) file is required for EBL boot\n");
+        fls_close(psi);
+        return -1;
+    }
+    fls_file_t *slb = fls_open(s->config.slb_path);
+    if (!slb) {
+        fls_close(psi);
+        return -1;
+    }
+    if (flasher_upload_ebl(s, slb) != 0) {
+        fls_close(slb);
+        fls_close(psi);
+        return -1;
+    }
+
+    /* 4. Configure protocol */
+    if (flasher_configure_protocol(s, slb) != 0) {
+        fls_close(slb);
+        fls_close(psi);
+        return -1;
+    }
+    fls_close(slb);
+    fls_close(psi);
+
+    FILE *fout = fopen(out_path, "wb");
+    if (!fout) {
+        fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
+        return -1;
+    }
+
+    uint32_t start_addr = NVRAM_PROTECT_START;
+    size_t total_size = NVRAM_PROTECT_SIZE;
+    size_t dumped = 0;
+
+    printf("[*] Setting initial read address to 0x%08X (ReqFlashSetAddress)...\n", start_addr);
+    if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_SET_ADDR, &start_addr, sizeof(start_addr),
+                             IFWD_MSG_REQ_FLASH_SET_ADDR, NULL, NULL) != 0) {
+        fprintf(stderr, "[-] ReqFlashSetAddress failed for 0x%08X\n", start_addr);
+        fclose(fout);
+        return -1;
+    }
+
+    printf("[*] Reading NVRAM flash blocks (16 KB chunks)...\n");
+    uint8_t rx_buf_16k[EBL_USB_DATA_BLOCK];
+
+    while (dumped < total_size) {
+        uint16_t req_len = (uint16_t)EBL_USB_DATA_BLOCK;
+        uint32_t status = 0;
+
+        /* ReqFlashReadBlock (0x0803) */
+        if (ebl_send_control_cmd(s, IFWD_MSG_REQ_FLASH_READ_BLK, &req_len, sizeof(req_len),
+                                 IFWD_MSG_REQ_FLASH_READ_BLK, &status, rx_buf_16k) != 0) {
+            fprintf(stderr, "\n[-] ReqFlashReadBlock failed at offset %zu (addr 0x%08X)\n",
+                    dumped, start_addr + (uint32_t)dumped);
+            break;
+        }
+
+        size_t written = fwrite(rx_buf_16k, 1, sizeof(rx_buf_16k), fout);
+        if (written != sizeof(rx_buf_16k)) {
+            fprintf(stderr, "\n[-] Failed to write to %s: %s\n", out_path, strerror(errno));
+            break;
+        }
+
+        dumped += sizeof(rx_buf_16k);
+        int percent = (int)((dumped * 100) / total_size);
+        printf("\r[*] Dumping NVRAM / IMEI: %3d%% (%zu / %zu bytes)", percent, dumped, total_size);
+        fflush(stdout);
+        usleep(10000);
+    }
+
+    fclose(fout);
+    printf("\n[+] NVRAM Dump complete! %zu bytes saved to %s\n", dumped, out_path);
+
+    /* Reboot */
+    flasher_reboot(s);
+    return (dumped == total_size) ? 0 : -1;
+}
+
 int flasher_reboot(flasher_session_t *s) {
     if (!s) return -1;
     printf("\n[*] Resetting target device (ReqForceHwReset)...\n");
@@ -1290,22 +1412,7 @@ int flasher_run(flasher_session_t *s) {
     }
     fls_close(slb);
 
-    /* 7. Flash BSY (Baseband System - partitions at 0x63200000 and 0x66000000) */
-    if (s->config.bsy_path) {
-        fls_file_t *bsy = fls_open(s->config.bsy_path);
-        if (!bsy) {
-            fprintf(stderr, "[-] Cannot open BSY: %s\n", s->config.bsy_path);
-            return -1;
-        }
-        if (flasher_flash_section(s, bsy, "BSY (Baseband System)", false) != 0) {
-            fprintf(stderr, "[-] Failed flashing BSY section\n");
-            fls_close(bsy);
-            return -1;
-        }
-        fls_close(bsy);
-    }
-
-    /* 8. Flash CDS (Customer Data System - partition at 0x63F60000) */
+    /* 7. Flash CDS (Customer Data System - partition at 0x63F60000, per Samsung Service Sequence) */
     if (s->config.cds_path) {
         fls_file_t *cds = fls_open(s->config.cds_path);
         if (!cds) {
@@ -1318,6 +1425,21 @@ int flasher_run(flasher_session_t *s) {
             return -1;
         }
         fls_close(cds);
+    }
+
+    /* 8. Flash BSY (Baseband System - partitions at 0x63200000 and 0x66000000) */
+    if (s->config.bsy_path) {
+        fls_file_t *bsy = fls_open(s->config.bsy_path);
+        if (!bsy) {
+            fprintf(stderr, "[-] Cannot open BSY: %s\n", s->config.bsy_path);
+            return -1;
+        }
+        if (flasher_flash_section(s, bsy, "BSY (Baseband System)", false) != 0) {
+            fprintf(stderr, "[-] Failed flashing BSY section\n");
+            fls_close(bsy);
+            return -1;
+        }
+        fls_close(bsy);
     }
 
     /* 9. Flash CSC / DFFS (Data Flash File System - partition at 0x44160000, NAND pacing enabled) */

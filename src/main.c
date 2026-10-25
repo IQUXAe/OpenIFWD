@@ -78,6 +78,7 @@ static void print_usage(const char *prog) {
     printf("  unpack   <file.fls> [out_dir]     Extract binary chunks from FLS container\n");
     printf("  scan                              Scan for connected phone TTY ports\n");
     printf("  ram-boot -p <port> [--psi <file>] [--slb <file>] --bin <file>   Load & execute binary directly in RAM\n");
+    printf("  dump-nvram [options]              Safely backup 1MB NVRAM/EEPROM (IMEI & RF calibrations)\n");
     printf("  flash    [options]                Flash Samsung Star 3 (GT-S5222)\n\n");
     printf("Flash Options:\n");
     printf("  -p, --port <device>     Serial port (e.g. /dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
@@ -399,6 +400,72 @@ int main(int argc, char **argv) {
 
         flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_run(session);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "dump-nvram") == 0) {
+        const char *port = NULL;
+        const char *out_path = "s5222_nvram_backup.bin";
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",     required_argument, 0, 'p'},
+            {"psi",      required_argument, 0, 1001},
+            {"slb",      required_argument, 0, 1002},
+            {"out",      required_argument, 0, 'o'},
+            {"help",     no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:o:h", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'o': out_path = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 1002: cfg.slb_path = optarg; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        if (!port) {
+            fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
+            return 1;
+        }
+
+        char auto_slb[1024] = {0};
+        char auto_bsy[1024] = {0};
+        char auto_cds[1024] = {0};
+        char auto_dffs[1024] = {0};
+        auto_detect_firmware_files(&cfg, auto_slb, auto_bsy, auto_cds, auto_dffs, sizeof(auto_slb));
+
+        cfg.is_usb = (strcmp(port, "usb") == 0);
+
+        transport_t *trans = NULL;
+        if (cfg.is_usb) {
+            trans = transport_create_usb();
+            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
+                fprintf(stderr, "[-] Failed to open direct USB interface\n");
+                if (trans) transport_destroy(trans);
+                return 1;
+            }
+        } else {
+            trans = transport_create_tty();
+            if (!trans || transport_open(trans, port, 115200) != 0) {
+                fprintf(stderr, "[-] Failed to open port %s\n", port);
+                if (trans) transport_destroy(trans);
+                return 1;
+            }
+        }
+
+        flasher_session_t *session = flasher_create(trans, &cfg);
+        int res = flasher_dump_nvram(session, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;
