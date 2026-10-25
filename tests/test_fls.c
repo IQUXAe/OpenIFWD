@@ -67,6 +67,13 @@ static void test_protocol_packets(void) {
     assert(parsed_len == (int)pkt_len);
     assert(hdr.msg_type == IFWD_MSG_REQ_SET_PROT_CONF);
 
+    /* Test EBL USB packet token calculation (matches pcapng frames 116, 128, 139) */
+    uint16_t zero2 = 0;
+    assert(ifwd_calc_ebl_token(IFWD_MSG_REQ_CFI_INFO_1, 2, (const uint8_t *)&zero2) == 0x0086);
+    uint32_t addr_psi = 0x00090000;
+    assert(ifwd_calc_ebl_token(IFWD_MSG_REQ_FLASH_SET_ADDR, 4, (const uint8_t *)&addr_psi) == 0x080F);
+    assert(ifwd_calc_ebl_token(IFWD_MSG_REQ_SEC_END, 2, (const uint8_t *)&zero2) == 0x0207);
+
     printf("[TEST] Protocol packet creation and verification PASSED!\n");
 }
 

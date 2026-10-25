@@ -184,6 +184,7 @@ _Static_assert(sizeof(fls_sec_cfg_entry_t) == 16, "fls_sec_cfg_entry_t must be 1
 uint16_t ifwd_calc_xor16(const uint8_t *data, size_t len);
 uint16_t ifwd_calc_crc16(const uint8_t *data, size_t len);
 uint8_t  ifwd_calc_sum8(const uint8_t *data, size_t len);
+uint16_t ifwd_calc_ebl_token(uint16_t msg_type, uint32_t length, const uint8_t *data);
 
 /* Packet building & parsing */
 size_t ifwd_build_packet(uint8_t channel, uint16_t msg_type,

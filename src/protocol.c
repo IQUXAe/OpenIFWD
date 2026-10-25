@@ -82,6 +82,16 @@ uint16_t ifwd_calc_crc16(const uint8_t *data, size_t len) {
     return crc;
 }
 
+uint16_t ifwd_calc_ebl_token(uint16_t msg_type, uint32_t length, const uint8_t *data) {
+    uint32_t sum = (uint32_t)msg_type + (length >> 16) + (length & 0xFFFF);
+    if (data && length > 0) {
+        for (size_t i = 0; i < length; i++) {
+            sum += data[i];
+        }
+    }
+    return (uint16_t)(sum & 0xFFFF);
+}
+
 size_t ifwd_build_packet(uint8_t channel, uint16_t msg_type,
                          const void *payload, uint16_t payload_len,
                          uint8_t *out_buf, size_t max_buf_len) {

@@ -504,9 +504,9 @@ static int ebl_send_control_cmd(flasher_session_t *s, uint16_t msg_type, uint16_
     memset(tx_buf, 0, sizeof(tx_buf));
 
     ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_buf;
-    hdr->token = token;
     hdr->msg_type = msg_type;
     hdr->length = payload_len;
+    hdr->token = (token != 0) ? token : ifwd_calc_ebl_token(msg_type, payload_len, (const uint8_t *)payload);
 
     if (payload && payload_len > 0) {
         size_t copy_sz = (size_t)payload_len;
@@ -849,7 +849,6 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
 
         uint8_t tx_pkt[EBL_USB_PACKET_SIZE];
         size_t sent = 0;
-        uint16_t blk_tok = 0;
 
         while (sent < img_size) {
             size_t chunk_len = img_size - sent;
@@ -857,9 +856,9 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
 
             memset(tx_pkt, 0, sizeof(tx_pkt));
             ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_pkt;
-            hdr->token = ++blk_tok;
             hdr->msg_type = IFWD_MSG_REQ_FLASH_WRITE_BLK; /* 0x0804 */
             hdr->length = (uint32_t)chunk_len;
+            hdr->token = ifwd_calc_ebl_token(hdr->msg_type, hdr->length, img_data + sent);
 
             memcpy(tx_pkt + sizeof(ebl_pkt_hdr_t), img_data + sent, chunk_len);
 
@@ -875,10 +874,11 @@ int flasher_flash_section(flasher_session_t *s, const fls_file_t *fls, const cha
                    name, target_addr, percent, sent, img_size);
             fflush(stdout);
 
+            /* Timing pacing: 20ms matching fullflash2rom.pcapng dump trace */
             if (is_nand) {
-                usleep(8000); /* 8ms pacing for NAND flash page programming */
+                usleep(25000); /* 25ms pacing for NAND flash filesystem */
             } else {
-                usleep(300);  /* 300us pacing for OneNAND */
+                usleep(20000); /* 20ms pacing for NOR/OneNAND */
             }
         }
         printf("\n[+] Partition %zu / %zu written successfully!\n", p + 1, entry_count);
@@ -1181,9 +1181,9 @@ int flasher_reboot(flasher_session_t *s) {
         uint8_t tx_pkt[EBL_USB_PACKET_SIZE];
         memset(tx_pkt, 0, sizeof(tx_pkt));
         ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)tx_pkt;
-        hdr->token = 0x0208;
         hdr->msg_type = IFWD_MSG_REQ_FORCE_HW_RESET;
         hdr->length = 4;
+        hdr->token = ifwd_calc_ebl_token(hdr->msg_type, hdr->length, NULL);
 
         transport_write(s->transport, tx_pkt, sizeof(tx_pkt));
         uint8_t rx_buf[64];
