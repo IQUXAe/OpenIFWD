@@ -17,6 +17,7 @@ typedef struct {
     const char *dffs_path;
     uint32_t baudrate;
     bool erase_all;
+    bool skip_csc;
     bool is_usb;
 } flasher_config_t;
 

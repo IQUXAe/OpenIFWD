@@ -58,7 +58,7 @@ static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_slb, ch
         }
 
         /* Match CSC / DFFS */
-        if (!cfg->dffs_path && (strstr(name, "csc") || strstr(name, "CSC") || (len >= 5 && strcmp(name + len - 5, ".dffs") == 0))) {
+        if (!cfg->skip_csc && !cfg->dffs_path && (strstr(name, "csc") || strstr(name, "CSC") || (len >= 5 && strcmp(name + len - 5, ".dffs") == 0))) {
             if (snprintf(auto_dffs, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_dffs, R_OK) == 0) {
                 cfg->dffs_path = auto_dffs;
                 printf("[*] Auto-detected Customization / DFFS (CSC): %s\n", cfg->dffs_path);
@@ -86,6 +86,7 @@ static void print_usage(const char *prog) {
     printf("  --bsy <file.fls>        Baseband system code (_BSY.fls)\n");
     printf("  --cds <file.fls>        Customer Data System (_CDS.fls)\n");
     printf("  --dffs <file.dffs>      Data Flash File System (.dffs)\n");
+    printf("  --skip-csc              Skip CSC/DFFS flash (boot StarOS baseband directly)\n");
     printf("  -b, --baud <rate>       Baud rate (default: 921600)\n");
     printf("  --erase-all             Erase whole flash before writing\n");
     printf("  -h, --help              Show this help menu\n\n");
@@ -343,6 +344,7 @@ int main(int argc, char **argv) {
             {"cds",       required_argument, 0, 1004},
             {"dffs",      required_argument, 0, 1005},
             {"erase-all", no_argument,       0, 1006},
+            {"skip-csc",  no_argument,       0, 1007},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
@@ -359,6 +361,7 @@ int main(int argc, char **argv) {
                 case 1004: cfg.cds_path = optarg; break;
                 case 1005: cfg.dffs_path = optarg; break;
                 case 1006: cfg.erase_all = true; break;
+                case 1007: cfg.skip_csc = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
             }

@@ -199,7 +199,7 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         if (chunk_len > 65536) chunk_len = 65536;
 
         int transferred = 0;
-        int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 5000);
+        int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 30000);
         if (r != 0) {
             fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
             return -1;
