@@ -217,6 +217,11 @@ static void tty_destroy(transport_t *t) {
     free(t);
 }
 
+static void tty_set_verbose(transport_t *t, bool verbose) {
+    (void)t;
+    (void)verbose;
+}
+
 static const transport_ops_t tty_ops = {
     .open = tty_open,
     .close = tty_close,
@@ -227,6 +232,7 @@ static const transport_ops_t tty_ops = {
     .flush = tty_flush,
     .reclaim = tty_flush,
     .switch_interface = NULL,
+    .set_verbose = tty_set_verbose,
     .destroy = tty_destroy
 };
 

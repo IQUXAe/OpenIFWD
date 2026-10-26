@@ -356,8 +356,19 @@ static int openifwd_send_recv(flasher_session_t *s,
 int flasher_open_ping(flasher_session_t *s) {
     uint32_t status_flags = 0;
     uint16_t resp_len = sizeof(status_flags);
-    return openifwd_send_recv(s, OPENIFWD_CMD_PING, NULL, 0,
-                              OPENIFWD_RSP_PONG, &status_flags, &resp_len, 3000);
+
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        if (s->config.verbose) {
+            printf("[*] Probing OpenIFWD agent ping (attempt %d/5)...\n", attempt);
+        }
+        int r = openifwd_send_recv(s, OPENIFWD_CMD_PING, NULL, 0,
+                                   OPENIFWD_RSP_PONG, &status_flags, &resp_len, 1000);
+        if (r == 0) {
+            return 0;
+        }
+        usleep(100000); /* 100ms between attempts */
+    }
+    return -1;
 }
 
 int flasher_open_get_hw_info(flasher_session_t *s, openifwd_hw_info_t *out_info) {

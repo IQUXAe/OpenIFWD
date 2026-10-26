@@ -86,9 +86,10 @@ static void print_usage(const char *prog) {
     printf("  --skip-csc              Skip CSC/DFFS flash (boot target OS directly)\n");
     printf("  -b, --baud <rate>       Baud rate (default: 921600)\n");
     printf("  --erase-all             Erase whole non-protected flash before writing\n");
+    printf("  -v, --verbose           Enable verbose logging (hex dumps and USB packet traces)\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
-    printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin\n", prog);
+    printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s ram-boot -p usb --bin my_os.bin --addr 0x60000000\n", prog);
     printf("  %s flash -p usb --bsy S5222_BSY.fls --cds S5222_CDS.fls\n", prog);
     printf("====================================================================\n");
@@ -142,22 +143,24 @@ int main(int argc, char **argv) {
         cfg.baudrate = 921600;
 
         static struct option long_options[] = {
-            {"port", required_argument, 0, 'p'},
-            {"bin",  required_argument, 0, 1001},
-            {"addr", required_argument, 0, 1002},
-            {"psi",  required_argument, 0, 1003},
-            {"help", no_argument,       0, 'h'},
+            {"port",    required_argument, 0, 'p'},
+            {"bin",     required_argument, 0, 1001},
+            {"addr",    required_argument, 0, 1002},
+            {"psi",     required_argument, 0, 1003},
+            {"verbose", no_argument,       0, 'v'},
+            {"help",    no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:h", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 1001: bin_path = optarg; break;
                 case 1002: ram_addr = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1003: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
             }
@@ -212,6 +215,10 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (cfg.verbose) {
+            transport_set_verbose(trans, true);
+        }
+
         flasher_session_t *s = flasher_create(trans, &cfg);
         int res = flasher_boot_ram(s, ram_addr, bdata, (size_t)bsz);
 
@@ -237,13 +244,14 @@ int main(int argc, char **argv) {
             {"dffs",      required_argument, 0, 1005},
             {"erase-all", no_argument,       0, 1006},
             {"skip-csc",  no_argument,       0, 1007},
+            {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:b:h", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 'b': cfg.baudrate = (uint32_t)atoi(optarg); break;
@@ -253,6 +261,7 @@ int main(int argc, char **argv) {
                 case 1005: cfg.dffs_path = optarg; break;
                 case 1006: cfg.erase_all = true; break;
                 case 1007: cfg.skip_csc = true; break;
+                case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
             }
@@ -287,6 +296,10 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (cfg.verbose) {
+            transport_set_verbose(trans, true);
+        }
+
         flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_flash(session);
         flasher_destroy(session);
@@ -305,17 +318,19 @@ int main(int argc, char **argv) {
             {"port",      required_argument, 0, 'p'},
             {"psi",       required_argument, 0, 1001},
             {"out",       required_argument, 0, 'o'},
+            {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:o:h", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:o:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
             }
@@ -343,6 +358,10 @@ int main(int argc, char **argv) {
                 if (trans) transport_destroy(trans);
                 return 1;
             }
+        }
+
+        if (cfg.verbose) {
+            transport_set_verbose(trans, true);
         }
 
         flasher_session_t *session = flasher_create(trans, &cfg);

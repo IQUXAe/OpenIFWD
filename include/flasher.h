@@ -19,6 +19,7 @@ typedef struct {
     bool erase_all;           /* Erase whole non-protected flash before writing */
     bool skip_csc;            /* Skip CSC / DFFS flashing */
     bool is_usb;              /* Direct USB connection (EP 0x02 OUT / EP 0x83 IN) */
+    bool verbose;             /* Verbose logging (hex dumps, packet traces) */
     const char *ram_exec_bin; /* Binary to load into RAM */
     uint32_t ram_exec_addr;   /* RAM execution target address (e.g. 0x60000000) */
 } flasher_config_t;

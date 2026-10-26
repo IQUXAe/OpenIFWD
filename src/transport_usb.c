@@ -16,10 +16,31 @@ typedef struct {
     uint8_t ep_in;
     uint8_t ep_out;
     int interface_number;
+    bool verbose;
     uint8_t rx_buf[65536];
     size_t rx_head;
     size_t rx_tail;
 } usb_priv_t;
+
+static void usb_hex_dump(const char *prefix, uint8_t ep, const uint8_t *data, size_t len) {
+    printf("%s [EP 0x%02X] (%zu bytes):\n", prefix, ep, len);
+    for (size_t i = 0; i < len; i += 16) {
+        printf("  %04zx: ", i);
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < len) {
+                printf("%02X ", data[i + j]);
+            } else {
+                printf("   ");
+            }
+        }
+        printf(" |");
+        for (size_t j = 0; j < 16 && (i + j) < len; j++) {
+            uint8_t c = data[i + j];
+            printf("%c", (c >= 32 && c <= 126) ? c : '.');
+        }
+        printf("|\n");
+    }
+}
 
 static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) {
     (void)baudrate;
@@ -167,6 +188,9 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
     int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_in, priv->rx_buf, sizeof(priv->rx_buf), &transferred, timeout_ms);
 
     if (r == 0 && transferred > 0) {
+        if (priv->verbose) {
+            usb_hex_dump("[VERBOSE USB IN]", priv->ep_in, priv->rx_buf, (size_t)transferred);
+        }
         priv->rx_head = 0;
         priv->rx_tail = (size_t)transferred;
         while (copied < count && priv->rx_head < priv->rx_tail) {
@@ -183,7 +207,8 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
         return 0;
     }
 
-    fprintf(stderr, "[!] libusb bulk read error on EP 0x%02X: %s\n", priv->ep_in, libusb_error_name(r));
+    fprintf(stderr, "[!] libusb bulk read error on EP 0x%02X: %s (code %d)\n",
+            priv->ep_in, libusb_error_name(r), r);
     return -1;
 }
 
@@ -198,10 +223,15 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         size_t chunk_len = count - total_written;
         if (chunk_len > 65536) chunk_len = 65536;
 
+        if (priv->verbose) {
+            usb_hex_dump("[VERBOSE USB OUT]", priv->ep_out, (const uint8_t *)(p + total_written), chunk_len);
+        }
+
         int transferred = 0;
         int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 30000);
         if (r != 0) {
-            fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s\n", priv->ep_out, libusb_error_name(r));
+            fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s (code %d)\n",
+                    priv->ep_out, libusb_error_name(r), r);
             return -1;
         }
         total_written += (size_t)transferred;
@@ -275,6 +305,12 @@ static int usb_switch_interface(transport_t *t, int new_interface, uint8_t new_e
     return 0;
 }
 
+static void usb_set_verbose(transport_t *t, bool verbose) {
+    if (!t || !t->priv) return;
+    usb_priv_t *priv = (usb_priv_t *)t->priv;
+    priv->verbose = verbose;
+}
+
 static void usb_destroy(transport_t *t) {
     if (!t) return;
     usb_close(t);
@@ -292,6 +328,7 @@ static const transport_ops_t usb_ops = {
     .flush = usb_flush,
     .reclaim = usb_reclaim,
     .switch_interface = usb_switch_interface,
+    .set_verbose = usb_set_verbose,
     .destroy = usb_destroy
 };
 
