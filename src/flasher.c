@@ -236,18 +236,22 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         return -1;
     }
 
-    /* Read Boot ROM ACK */
+    /* Read Boot ROM ACK (Boot ROM sends 0x01 checksum ACK, then 0x01 execution handover ACK) */
     uint8_t ack_buf[16] = {0};
-    int r = transport_read(s->transport, ack_buf, sizeof(ack_buf), 2000);
+    int r = transport_read(s->transport, ack_buf, 1, 2000);
     if (r <= 0) {
-        r = transport_read(s->transport, ack_buf, sizeof(ack_buf), 2000);
+        r = transport_read(s->transport, ack_buf, 1, 2000);
     }
 
     if (r > 0 && (ack_buf[0] == 0x01 || ack_buf[0] == 0x0B || ack_buf[0] == 0xB1 || ack_buf[0] == 0xC1)) {
-        printf("[+] PSI acknowledged by Boot ROM (%d byte(s): 0x%02X", r, ack_buf[0]);
-        if (r > 1) printf(" 0x%02X", ack_buf[1]);
-        printf(")\n");
-        printf("[+] PSI successfully executed by Boot ROM!\n");
+        printf("[+] PSI acknowledged by Boot ROM (0x%02X)\n", ack_buf[0]);
+
+        /* Read 2nd Boot ROM execution ACK matching Frame 82 in trace */
+        uint8_t ack2[4] = {0};
+        int r2 = transport_read(s->transport, ack2, 1, 500);
+        if (r2 > 0) {
+            printf("[+] PSI execution handover confirmed by Boot ROM (0x%02X)\n", ack2[0]);
+        }
     } else {
         fprintf(stderr, "[-] Unexpected Boot ROM ACK (%d bytes, 0x%02X)\n", r, ack_buf[0]);
         if (allocated_psi) free(allocated_psi);
@@ -256,8 +260,9 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
 
     if (allocated_psi) free(allocated_psi);
 
-    transport_flush(s->transport);
-    usleep(30000);
+    /* Do NOT call transport_flush() / USBDEVFS_RESETEP.
+     * Brief delay for SRAM execution startup matching vendor trace */
+    usleep(200000);
     return 0;
 }
 
