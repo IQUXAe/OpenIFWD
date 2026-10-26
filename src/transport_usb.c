@@ -25,27 +25,6 @@ typedef struct {
     size_t rx_tail;
 } usb_priv_t;
 
-static void usb_reset_host_ep(usb_priv_t *priv, uint8_t ep) {
-    if (!priv || !priv->dev_handle) return;
-    libusb_device *dev = libusb_get_device(priv->dev_handle);
-    if (!dev) return;
-    uint8_t bus = libusb_get_bus_number(dev);
-    uint8_t dev_addr = libusb_get_device_address(dev);
-    char dev_path[64];
-    snprintf(dev_path, sizeof(dev_path), "/dev/bus/usb/%03u/%03u", bus, dev_addr);
-
-    int fd = open(dev_path, O_RDWR);
-    if (fd >= 0) {
-        unsigned int ep_arg = ep;
-        if (ioctl(fd, USBDEVFS_RESETEP, &ep_arg) == 0) {
-            if (priv->verbose) {
-                printf("[*] Host endpoint 0x%02X reset via USBDEVFS_RESETEP\n", ep);
-            }
-        }
-        close(fd);
-    }
-}
-
 static void usb_hex_dump(const char *prefix, uint8_t ep, const uint8_t *data, size_t len) {
     printf("%s [EP 0x%02X] (%zu bytes):\n", prefix, ep, len);
     for (size_t i = 0; i < len; i += 16) {
@@ -91,8 +70,9 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
     bool has_target = (device_name && sscanf(device_name, "%hx:%hx", &target_vid, &target_pid) == 2);
 
     printf("[*] Waiting for phone connection on USB (hold Volume Down and insert USB cable)...\n");
+    fflush(stdout);
     time_t start = time(NULL);
-    while (time(NULL) - start < 30) {
+    while (time(NULL) - start < 600) {
         if (has_target) {
             priv->dev_handle = libusb_open_device_with_vid_pid(priv->ctx, target_vid, target_pid);
         } else {
@@ -101,6 +81,7 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
                 priv->dev_handle = libusb_open_device_with_vid_pid(priv->ctx, known_devices[i].vid, known_devices[i].pid);
                 if (priv->dev_handle) {
                     printf("[+] Found Infineon/Samsung USB device: %04x:%04x\n", known_devices[i].vid, known_devices[i].pid);
+                    fflush(stdout);
                     break;
                 }
             }
@@ -158,11 +139,9 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
         }
     }
 
-    if (libusb_claim_interface(priv->dev_handle, priv->interface_number) < 0) {
-        fprintf(stderr, "[-] Failed to claim interface %d\n", priv->interface_number);
-        libusb_close(priv->dev_handle);
-        priv->dev_handle = NULL;
-        return -1;
+    /* Claim all CDC interfaces (Control = 0, Data = 1) */
+    for (int iface_idx = 0; iface_idx < 2; iface_idx++) {
+        libusb_claim_interface(priv->dev_handle, iface_idx);
     }
 
     printf("[*] Claimed interface %d: Bulk OUT = 0x%02X, Bulk IN = 0x%02X\n",
@@ -174,7 +153,9 @@ static int usb_open(transport_t *t, const char *device_name, uint32_t baudrate) 
 static int usb_close(transport_t *t) {
     usb_priv_t *priv = (usb_priv_t *)t->priv;
     if (priv->dev_handle) {
-        libusb_release_interface(priv->dev_handle, priv->interface_number);
+        for (int iface_idx = 0; iface_idx < 2; iface_idx++) {
+            libusb_release_interface(priv->dev_handle, iface_idx);
+        }
         libusb_close(priv->dev_handle);
         priv->dev_handle = NULL;
     }
@@ -231,10 +212,6 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
         return 0;
     }
 
-    if (r == LIBUSB_ERROR_PIPE) {
-        usb_reset_host_ep(priv, priv->ep_in);
-    }
-
     fprintf(stderr, "[!] libusb bulk read error on EP 0x%02X: %s (code %d)\n",
             priv->ep_in, libusb_error_name(r), r);
     return -1;
@@ -258,12 +235,6 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         int transferred = 0;
         int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 30000);
         if (r != 0) {
-            if (r == LIBUSB_ERROR_PIPE) {
-                if (priv->verbose) {
-                    fprintf(stderr, "[!] EP 0x%02X reported LIBUSB_ERROR_PIPE, resetting host ring via USBDEVFS_RESETEP...\n", priv->ep_out);
-                }
-                usb_reset_host_ep(priv, priv->ep_out);
-            }
             fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s (code %d)\n",
                     priv->ep_out, libusb_error_name(r), r);
             return -1;
@@ -294,19 +265,11 @@ static int usb_flush(transport_t *t) {
     priv->rx_head = 0;
     priv->rx_tail = 0;
 
-    /* Reset host endpoint rings without sending control transfers to EP 0 */
-    if (priv->ep_out) {
-        usb_reset_host_ep(priv, priv->ep_out);
-    }
+    /* Drain any pending bytes on Bulk IN without touching endpoint state */
     if (priv->ep_in) {
-        usb_reset_host_ep(priv, priv->ep_in);
-    }
-
-    /* Drain any pending bytes on Bulk IN without touching EP 0x00 */
-    if (priv->ep_in) {
-        unsigned char dummy[16384];
+        unsigned char dummy[4096];
         int transferred = 0;
-        while (libusb_bulk_transfer(priv->dev_handle, priv->ep_in, dummy, sizeof(dummy), &transferred, 20) == 0 && transferred > 0) {
+        while (libusb_bulk_transfer(priv->dev_handle, priv->ep_in, dummy, sizeof(dummy), &transferred, 10) == 0 && transferred > 0) {
             /* drained */
         }
     }
