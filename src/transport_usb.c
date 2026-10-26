@@ -232,7 +232,7 @@ static int usb_flush(transport_t *t) {
 
     /* Drain any pending bytes on Bulk IN without touching EP 0x00 */
     if (priv->ep_in) {
-        unsigned char dummy[512];
+        unsigned char dummy[16384];
         int transferred = 0;
         while (libusb_bulk_transfer(priv->dev_handle, priv->ep_in, dummy, sizeof(dummy), &transferred, 20) == 0 && transferred > 0) {
             /* drained */
