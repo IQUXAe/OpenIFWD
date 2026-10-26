@@ -257,7 +257,7 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     if (allocated_psi) free(allocated_psi);
 
     transport_flush(s->transport);
-    usleep(250000);
+    usleep(30000);
     return 0;
 }
 
@@ -362,11 +362,11 @@ int flasher_open_ping(flasher_session_t *s) {
             printf("[*] Probing OpenIFWD agent ping (attempt %d/5)...\n", attempt);
         }
         int r = openifwd_send_recv(s, OPENIFWD_CMD_PING, NULL, 0,
-                                   OPENIFWD_RSP_PONG, &status_flags, &resp_len, 1000);
+                                   OPENIFWD_RSP_PONG, &status_flags, &resp_len, 500);
         if (r == 0) {
             return 0;
         }
-        usleep(100000); /* 100ms between attempts */
+        usleep(40000); /* 40ms between attempts */
     }
     return -1;
 }
@@ -470,7 +470,7 @@ int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
     if (flasher_upload_psi(s, NULL) != 0) return -1;
 
     /* Settle and ping */
-    usleep(250000);
+    usleep(20000);
     printf("[*] Connecting to OpenIFWD agent on device...\n");
     if (flasher_open_ping(s) != 0) {
         fprintf(stderr, "[-] Target agent ping failed\n");
@@ -532,7 +532,7 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
     if (flasher_upload_psi(s, NULL) != 0) return -1;
 
     /* Settle and ping */
-    usleep(250000);
+    usleep(20000);
     printf("[*] Connecting to OpenIFWD agent on device...\n");
     if (flasher_open_ping(s) != 0) {
         fprintf(stderr, "[-] Target agent ping failed\n");
