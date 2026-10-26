@@ -454,6 +454,38 @@ int flasher_open_reboot(flasher_session_t *s) {
                               OPENIFWD_RSP_OK, NULL, NULL, 1000);
 }
 
+int flasher_connect_agent(flasher_session_t *s) {
+    if (!s || !s->transport) return -1;
+
+    printf("[*] Connecting to OpenIFWD agent on device...\n");
+
+    /* 1. In direct USB mode, wait for Open PSI readiness token (0xCC 0xCC) on Bulk IN (EP 0x83).
+     * This inverts the handshake to match vendor psi_ram.bin sequence (0x81bc8),
+     * ensuring the device has initialized DWC2 DMA and armed EP 0x02 before host sends OUT. */
+    if (s->config.is_usb) {
+        printf("[*] Waiting for Open PSI handshake token on EP 0x83...\n");
+        uint8_t tok[4] = {0};
+        int tn = transport_read(s->transport, tok, 2, 2500);
+        if (tn >= 2 && tok[0] == 0xCC && tok[1] == 0xCC) {
+            printf("[+] Received Open PSI readiness token (0x%02X 0x%02X) on EP 0x83!\n", tok[0], tok[1]);
+        } else if (tn > 0) {
+            printf("[*] Received %d byte(s) on EP 0x83 (0x%02X), proceeding...\n", tn, tok[0]);
+        } else {
+            printf("[*] No early token on EP 0x83 (timeout), probing ping...\n");
+        }
+    } else {
+        usleep(30000);
+    }
+
+    /* 2. Probe OpenIFWD agent ping */
+    if (flasher_open_ping(s) != 0) {
+        fprintf(stderr, "[-] Target agent ping failed\n");
+        return -1;
+    }
+    printf("[+] Target agent connected and ready!\n");
+    return 0;
+}
+
 int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
     if (!s || !out_path) return -1;
 
@@ -469,14 +501,8 @@ int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
     /* 2. Upload Open PSI into SRAM */
     if (flasher_upload_psi(s, NULL) != 0) return -1;
 
-    /* Settle and ping */
-    usleep(20000);
-    printf("[*] Connecting to OpenIFWD agent on device...\n");
-    if (flasher_open_ping(s) != 0) {
-        fprintf(stderr, "[-] Target agent ping failed\n");
-        return -1;
-    }
-    printf("[+] Target agent connected and ready!\n");
+    /* 3. Connect to agent (reads EP 0x83 token then pings) */
+    if (flasher_connect_agent(s) != 0) return -1;
 
     openifwd_hw_info_t hw;
     if (flasher_open_get_hw_info(s, &hw) == 0) {
@@ -531,14 +557,8 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
     /* 2. Upload Open PSI into SRAM */
     if (flasher_upload_psi(s, NULL) != 0) return -1;
 
-    /* Settle and ping */
-    usleep(20000);
-    printf("[*] Connecting to OpenIFWD agent on device...\n");
-    if (flasher_open_ping(s) != 0) {
-        fprintf(stderr, "[-] Target agent ping failed\n");
-        return -1;
-    }
-    printf("[+] Target agent connected and ready!\n");
+    /* 3. Connect to Open PSI agent */
+    if (flasher_connect_agent(s) != 0) return -1;
 
     printf("[*] OpenIFWD RAM Boot: streaming %zu bytes to 0x%08X...\n", size, (unsigned int)ram_addr);
     const size_t chunk_size = 2048;
@@ -667,14 +687,8 @@ int flasher_flash(flasher_session_t *s) {
     /* 2. Upload Open PSI into SRAM */
     if (flasher_upload_psi(s, NULL) != 0) return -1;
 
-    /* Settle and ping */
-    usleep(250000);
-    printf("[*] Connecting to OpenIFWD agent on device...\n");
-    if (flasher_open_ping(s) != 0) {
-        fprintf(stderr, "[-] Target agent ping failed\n");
-        return -1;
-    }
-    printf("[+] Target agent connected and ready!\n");
+    /* 3. Connect to Open PSI agent */
+    if (flasher_connect_agent(s) != 0) return -1;
 
     openifwd_hw_info_t hw;
     if (flasher_open_get_hw_info(s, &hw) == 0) {
