@@ -48,6 +48,9 @@ The bootstrapping sequence from device power-on proceeds in two stages:
 
 ### Stage 2: OpenIFWD Session Handshake
 1. Once executing in SRAM, the OpenIFWD PSI agent sets up CPU clocks, initializes SDRAM, and exposes the OpenIFWD protocol over USB or UART.
+   - **USB Zero-Reset Session Inheritance:** On Intel/Infineon XMM2150, the PSI agent does not reset or re-enumerate the USB hardware core (retaining the existing `058b:0041` enumeration on the host PC). The agent preserves the Boot ROM SCU clock gate at `0xE4900900` (bit 3) and dispatches Bulk transfers via Boot ROM high vector calls:
+     - `0xFFFF0060`: `usb_bulk_read(void *buf, uint32_t len, uint32_t *transferred)` (EP 0x02 Bulk OUT)
+     - `0xFFFF0070`: `usb_bulk_write(const void *buf, uint32_t len, uint32_t *transferred)` (EP 0x83 Bulk IN)
 2. Host issues `CMD_PING` (`0x01`).
 3. PSI agent replies with `RSP_PONG` (`0x81`), indicating target readiness and protocol capabilities.
 4. Normal flash / memory operations can now be performed.

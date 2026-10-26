@@ -96,10 +96,9 @@ This compiles:
     --cds S5222XXMJ1_CDS.fls \
     --dffs S5222OXEMJ1_CSC.dffs
 
-# Using stock vendor PSI/SLB containers if desired:
+# Using a custom PSI binary or container if desired:
 ./openifwd flash -p usb \
     --psi S5222XXMJ1_psi.fls \
-    --slb S5222XXMJ1_slb.fls \
     --bsy S5222XXMJ1_BSY.fls \
     --cds S5222XXMJ1_CDS.fls \
     --erase-all
