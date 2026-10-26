@@ -12,8 +12,9 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <dirent.h>
+#include <errno.h>
 
-static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_slb, char *auto_bsy, char *auto_cds, char *auto_dffs, size_t buf_sz) {
+static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_bsy, char *auto_cds, char *auto_dffs, size_t buf_sz) {
     if (!cfg || !cfg->psi_path) return;
 
     char dir[512];
@@ -33,14 +34,6 @@ static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_slb, ch
         const char *name = entry->d_name;
         size_t len = strlen(name);
         if (len < 4) continue;
-
-        /* Match SLB */
-        if (!cfg->slb_path && (strstr(name, "slb") || strstr(name, "SLB")) && strcmp(name + len - 4, ".fls") == 0) {
-            if (snprintf(auto_slb, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_slb, R_OK) == 0) {
-                cfg->slb_path = auto_slb;
-                printf("[*] Auto-detected Secondary Loader (SLB): %s\n", cfg->slb_path);
-            }
-        }
 
         /* Match BSY */
         if (!cfg->bsy_path && (strstr(name, "bsy") || strstr(name, "BSY")) && strcmp(name + len - 4, ".fls") == 0) {
@@ -87,16 +80,15 @@ static void print_usage(const char *prog) {
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
     printf("  --psi <file.bin/fls>    Custom PSI file (default: built-in Open Rust PSI)\n");
-    printf("  --slb <file.fls>        Secondary Loader Binary / EBL (_slb.fls)\n");
     printf("  --bsy <file.fls>        Baseband system code (_BSY.fls)\n");
     printf("  --cds <file.fls>        Customer Data System (_CDS.fls)\n");
     printf("  --dffs <file.dffs>      Data Flash File System (.dffs)\n");
     printf("  --skip-csc              Skip CSC/DFFS flash (boot target OS directly)\n");
     printf("  -b, --baud <rate>       Baud rate (default: 921600)\n");
-    printf("  --erase-all             Erase whole flash before writing\n");
+    printf("  --erase-all             Erase whole non-protected flash before writing\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
-    printf("  %s dump-nvram -p usb -o my_nvram.bin\n", prog);
+    printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin\n", prog);
     printf("  %s ram-boot -p usb --bin my_os.bin --addr 0x60000000\n", prog);
     printf("  %s flash -p usb --bsy S5222_BSY.fls --cds S5222_CDS.fls\n", prog);
     printf("====================================================================\n");
@@ -112,14 +104,11 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "info") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "Error: missing FLS file path.\nUsage: %s info <file.fls>\n", argv[0]);
+            fprintf(stderr, "Usage: %s info <file.fls>\n", argv[0]);
             return 1;
         }
         fls_file_t *fls = fls_open(argv[2]);
-        if (!fls) {
-            fprintf(stderr, "Failed to open FLS file: %s\n", argv[2]);
-            return 1;
-        }
+        if (!fls) return 1;
         fls_print_info(fls);
         fls_close(fls);
         return 0;
@@ -127,67 +116,87 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "unpack") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "Error: missing FLS file path.\nUsage: %s unpack <file.fls> [out_dir]\n", argv[0]);
+            fprintf(stderr, "Usage: %s unpack <file.fls> [out_dir]\n", argv[0]);
             return 1;
         }
-        const char *out_dir = (argc >= 4) ? argv[3] : "./unpacked";
+        const char *out_dir = (argc >= 4) ? argv[3] : ".";
         fls_file_t *fls = fls_open(argv[2]);
-        if (!fls) {
-            fprintf(stderr, "Failed to open FLS file: %s\n", argv[2]);
-            return 1;
-        }
-        int ret = fls_unpack(fls, out_dir);
+        if (!fls) return 1;
+        int res = fls_unpack(fls, out_dir);
         fls_close(fls);
-        return ret;
+        return (res == 0) ? 0 : 1;
     }
 
     if (strcmp(cmd, "scan") == 0) {
+        printf("[*] Scanning for phone TTY ports...\n");
         transport_scan_ports();
         return 0;
     }
 
     if (strcmp(cmd, "ram-boot") == 0) {
         const char *port = NULL;
-        const char *psi_path = NULL;
-        const char *slb_path = NULL;
         const char *bin_path = NULL;
-        uint32_t ram_addr = 0x60000000; /* Default SDRAM address for Samsung GT-S5222 */
+        uint32_t ram_addr = 0x60000000;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
 
-        for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) port = argv[++i];
-            else if (strcmp(argv[i], "--psi") == 0 && i + 1 < argc) psi_path = argv[++i];
-            else if (strcmp(argv[i], "--slb") == 0 && i + 1 < argc) slb_path = argv[++i];
-            else if (strcmp(argv[i], "--bin") == 0 && i + 1 < argc) bin_path = argv[++i];
-            else if (strcmp(argv[i], "--addr") == 0 && i + 1 < argc) ram_addr = (uint32_t)strtoul(argv[++i], NULL, 0);
+        static struct option long_options[] = {
+            {"port", required_argument, 0, 'p'},
+            {"bin",  required_argument, 0, 1001},
+            {"addr", required_argument, 0, 1002},
+            {"psi",  required_argument, 0, 1003},
+            {"help", no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:h", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 1001: bin_path = optarg; break;
+                case 1002: ram_addr = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 1003: cfg.psi_path = optarg; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
         }
 
         if (!port || !bin_path) {
-            fprintf(stderr, "[-] Error: -p <port> and --bin <file.bin> are required for ram-boot.\n");
-            fprintf(stderr, "    Usage: %s ram-boot -p /dev/ttyACM0 --bin payload.bin [--addr 0x60000000]\n", argv[0]);
+            fprintf(stderr, "[-] Error: -p <port> and --bin <file.bin> are required for ram-boot\n");
             return 1;
         }
 
         FILE *bf = fopen(bin_path, "rb");
         if (!bf) {
-            fprintf(stderr, "[-] Failed to open binary payload: %s\n", bin_path);
+            fprintf(stderr, "[-] Error: Failed to open binary: %s (%s)\n", bin_path, strerror(errno));
             return 1;
         }
         fseek(bf, 0, SEEK_END);
         long bsz = ftell(bf);
         rewind(bf);
-        uint8_t *bdata = (uint8_t *)malloc(bsz);
-        if (!bdata || fread(bdata, 1, bsz, bf) != (size_t)bsz) {
-            fprintf(stderr, "[-] Failed to read binary payload\n");
+        if (bsz <= 0) {
+            fprintf(stderr, "[-] Error: Empty binary payload\n");
             fclose(bf);
-            free(bdata);
+            return 1;
+        }
+
+        uint8_t *bdata = (uint8_t *)malloc((size_t)bsz);
+        if (!bdata || fread(bdata, 1, (size_t)bsz, bf) != (size_t)bsz) {
+            fprintf(stderr, "[-] Error: Failed to read binary payload\n");
+            fclose(bf);
+            if (bdata) free(bdata);
             return 1;
         }
         fclose(bf);
 
+        cfg.is_usb = (strcmp(port, "usb") == 0);
+
         transport_t *trans = NULL;
-        if (strcmp(port, "usb") == 0) {
+        if (cfg.is_usb) {
             trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, 115200) != 0) {
+            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
                 fprintf(stderr, "[-] Failed to open direct USB interface\n");
                 if (trans) transport_destroy(trans);
                 free(bdata);
@@ -203,70 +212,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        flasher_config_t cfg;
-        memset(&cfg, 0, sizeof(cfg));
-        cfg.psi_path = psi_path;
-        cfg.slb_path = slb_path;
-        cfg.baudrate = 921600;
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-        cfg.use_open_psi = (psi_path == NULL);
-
         flasher_session_t *s = flasher_create(trans, &cfg);
-
-        int res = 0;
-        if (!psi_path && !slb_path) {
-            /* Clean OpenIFWD protocol with built-in Rust PSI */
-            if (flasher_sync(s, 40) != 0) {
-                fprintf(stderr, "[-] Device synchronization failed\n");
-                flasher_destroy(s);
-                transport_destroy(trans);
-                free(bdata);
-                return 1;
-            }
-
-            if (flasher_upload_psi(s, NULL) != 0) {
-                fprintf(stderr, "[-] PSI upload failed\n");
-                flasher_destroy(s);
-                transport_destroy(trans);
-                free(bdata);
-                return 1;
-            }
-
-            usleep(250000);
-            if (flasher_open_ping(s) != 0) {
-                fprintf(stderr, "[-] OpenIFWD agent ping failed\n");
-                flasher_destroy(s);
-                transport_destroy(trans);
-                free(bdata);
-                return 1;
-            }
-
-            res = flasher_boot_ram_open(s, ram_addr, bdata, (size_t)bsz);
-        } else {
-            /* Legacy EBL path if user specified stock FLS files */
-            if (flasher_sync(s, 45) != 0) {
-                fprintf(stderr, "[-] Device synchronization failed\n");
-                flasher_destroy(s);
-                transport_destroy(trans);
-                free(bdata);
-                return 1;
-            }
-
-            fls_file_t *psi = fls_open(psi_path);
-            if (psi) {
-                flasher_upload_psi(s, psi);
-                if (slb_path) {
-                    fls_file_t *slb = fls_open(slb_path);
-                    if (slb) {
-                        flasher_upload_ebl(s, slb);
-                        fls_close(slb);
-                    }
-                }
-                fls_close(psi);
-            }
-            flasher_configure_protocol(s, NULL);
-            res = flasher_boot_ram(s, ram_addr, bdata, (size_t)bsz);
-        }
+        int res = flasher_boot_ram(s, ram_addr, bdata, (size_t)bsz);
 
         free(bdata);
         flasher_destroy(s);
@@ -285,31 +232,27 @@ int main(int argc, char **argv) {
             {"port",      required_argument, 0, 'p'},
             {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
-            {"slb",       required_argument, 0, 1002},
             {"bsy",       required_argument, 0, 1003},
             {"cds",       required_argument, 0, 1004},
             {"dffs",      required_argument, 0, 1005},
             {"erase-all", no_argument,       0, 1006},
             {"skip-csc",  no_argument,       0, 1007},
-            {"patch-ebl", no_argument,       0, 1008},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
-        optind = 2; /* Skip "flash" command */
+        optind = 2;
         int opt, opt_idx = 0;
         while ((opt = getopt_long(argc, argv, "p:b:h", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 'b': cfg.baudrate = (uint32_t)atoi(optarg); break;
                 case 1001: cfg.psi_path = optarg; break;
-                case 1002: cfg.slb_path = optarg; break;
                 case 1003: cfg.bsy_path = optarg; break;
                 case 1004: cfg.cds_path = optarg; break;
                 case 1005: cfg.dffs_path = optarg; break;
                 case 1006: cfg.erase_all = true; break;
                 case 1007: cfg.skip_csc = true; break;
-                case 1008: cfg.patch_ebl = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
             }
@@ -320,11 +263,10 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        char auto_slb[1024] = {0};
         char auto_bsy[1024] = {0};
         char auto_cds[1024] = {0};
         char auto_dffs[1024] = {0};
-        auto_detect_firmware_files(&cfg, auto_slb, auto_bsy, auto_cds, auto_dffs, sizeof(auto_slb));
+        auto_detect_firmware_files(&cfg, auto_bsy, auto_cds, auto_dffs, sizeof(auto_bsy));
 
         cfg.is_usb = (strcmp(port, "usb") == 0);
 
@@ -346,7 +288,7 @@ int main(int argc, char **argv) {
         }
 
         flasher_session_t *session = flasher_create(trans, &cfg);
-        int res = flasher_run(session);
+        int res = flasher_flash(session);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;
@@ -358,14 +300,11 @@ int main(int argc, char **argv) {
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.baudrate = 921600;
-        cfg.patch_ebl = true;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
             {"psi",       required_argument, 0, 1001},
-            {"slb",       required_argument, 0, 1002},
             {"out",       required_argument, 0, 'o'},
-            {"patch-ebl", no_argument,       0, 1008},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
@@ -377,8 +316,6 @@ int main(int argc, char **argv) {
                 case 'p': port = optarg; break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
-                case 1002: cfg.slb_path = optarg; break;
-                case 1008: cfg.patch_ebl = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
             }
@@ -388,12 +325,6 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
             return 1;
         }
-
-        char auto_slb[1024] = {0};
-        char auto_bsy[1024] = {0};
-        char auto_cds[1024] = {0};
-        char auto_dffs[1024] = {0};
-        auto_detect_firmware_files(&cfg, auto_slb, auto_bsy, auto_cds, auto_dffs, sizeof(auto_slb));
 
         cfg.is_usb = (strcmp(port, "usb") == 0);
 
@@ -415,12 +346,7 @@ int main(int argc, char **argv) {
         }
 
         flasher_session_t *session = flasher_create(trans, &cfg);
-        int res = 0;
-        if (!cfg.psi_path) {
-            res = flasher_dump_nvram_open(session, out_path);
-        } else {
-            res = flasher_dump_nvram(session, out_path);
-        }
+        int res = flasher_dump_nvram(session, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;

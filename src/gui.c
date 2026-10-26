@@ -71,7 +71,6 @@ typedef struct {
     GtkWidget *check_builtin_psi;
     GtkWidget *entry_psi;
     GtkWidget *btn_browse_psi;
-    GtkWidget *entry_slb;
     GtkWidget *entry_bsy;
     GtkWidget *entry_cds;
     GtkWidget *entry_dffs;
@@ -229,39 +228,8 @@ static void *worker_flash_thread(void *arg) {
         goto finish;
     }
 
-    gui_log_async("[*] Waiting for phone connection... (Hold Volume Down or reinsert battery)\n");
-    if (flasher_sync(s, 40) != 0) {
-        gui_log_async("[-] Device synchronization failed or timed out.\n");
-        flasher_destroy(s);
-        goto finish;
-    }
-    gui_set_progress_async(0.20, "Synchronized!");
-    gui_log_async("[+] Device synchronized!\n");
-
     /* Check if RAM only boot */
     gboolean ram_only = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_ram_only));
-
-    /* Upload PSI */
-    if (cfg->use_open_psi || !cfg->psi_path || strlen(cfg->psi_path) == 0) {
-        gui_log_async("[*] Uploading built-in Open Rust PSI...\n");
-        gui_set_progress_async(0.30, "Uploading Open PSI...");
-        if (flasher_upload_psi(s, NULL) != 0) {
-            gui_log_async("[-] Built-in PSI upload failed\n");
-            flasher_destroy(s);
-            goto finish;
-        }
-    } else {
-        gui_log_async("[*] Uploading custom PSI: %s\n", cfg->psi_path);
-        gui_set_progress_async(0.30, "Uploading PSI...");
-        fls_file_t *psi = fls_open(cfg->psi_path);
-        int r = flasher_upload_psi(s, psi);
-        if (psi) fls_close(psi);
-        if (r != 0) {
-            gui_log_async("[-] PSI upload failed: %s\n", cfg->psi_path);
-            flasher_destroy(s);
-            goto finish;
-        }
-    }
 
     if (ram_only) {
         /* RAM Boot mode */
@@ -308,106 +276,39 @@ static void *worker_flash_thread(void *arg) {
             if (payload_buf && payload_len > 0) {
                 uint32_t addr = cfg->ram_exec_addr ? cfg->ram_exec_addr : 0x60000000;
                 gui_log_async("[*] Uploading payload to SDRAM at 0x%08X (%zu bytes)...\n", addr, payload_len);
-                gui_set_progress_async(0.70, "Streaming to SDRAM...");
-                if (cfg->use_open_psi || !cfg->slb_path || strlen(cfg->slb_path) == 0) {
-                    usleep(250000);
-                    flasher_open_ping(s);
-                    flasher_boot_ram_open(s, addr, payload_buf, payload_len);
+                gui_set_progress_async(0.50, "Executing RAM boot...");
+                if (flasher_boot_ram(s, addr, payload_buf, payload_len) != 0) {
+                    gui_log_async("[-] RAM boot execution failed\n");
+                    gui_set_progress_async(0.0, "RAM Boot Failed");
                 } else {
-                    flasher_boot_ram(s, addr, payload_buf, payload_len);
+                    gui_set_progress_async(1.0, "RAM Execution Started!");
+                    gui_log_async("[+] RAM boot sequence completed!\n");
                 }
                 free(payload_buf);
             } else {
                 gui_log_async("[-] Could not load payload from %s\n", cfg->bsy_path);
             }
         }
-        gui_set_progress_async(1.0, "RAM Execution Started!");
-        gui_log_async("[+] RAM boot sequence completed!\n");
         flasher_destroy(s);
         goto finish;
     }
 
-    /* Full Flash mode: Upload SLB */
-    if (cfg->slb_path && strlen(cfg->slb_path) > 0) {
-        gui_log_async("[*] Uploading SLB / EBL: %s\n", cfg->slb_path);
-        gui_set_progress_async(0.40, "Injecting SLB/EBL...");
-        fls_file_t *slb = fls_open(cfg->slb_path);
-        if (slb) {
-            flasher_upload_ebl(s, slb);
-            fls_close(slb);
-        } else {
-            gui_log_async("[-] Warning: Failed to open SLB: %s\n", cfg->slb_path);
-        }
+    /* Full Flash mode using OpenIFWD engine */
+    gui_log_async("[*] Starting OpenIFWD Firmware Flashing...\n");
+    gui_set_progress_async(0.40, "Flashing firmware...");
+    if (flasher_flash(s) != 0) {
+        gui_log_async("[-] Flashing failed\n");
+        gui_set_progress_async(0.0, "Flashing Failed");
+    } else {
+        gui_set_progress_async(1.0, "Flashing Complete!");
+        gui_log_async("[+] Firmware flashed and device rebooted successfully!\n");
     }
-
-    gui_set_progress_async(0.50, "Configuring protocol...");
-    flasher_configure_protocol(s, NULL);
-    flasher_query_flash_id(s);
-
-    if (cfg->erase_all) {
-        gui_log_async("[*] Erasing Flash memory...\n");
-        gui_set_progress_async(0.60, "Erasing flash...");
-        flasher_erase_flash(s, 0x00000000, 0x04000000);
-    }
-
-    if (cfg->bsy_path && strlen(cfg->bsy_path) > 0) {
-        gui_log_async("[*] Flashing Baseband / Code: %s\n", cfg->bsy_path);
-        gui_set_progress_async(0.70, "Flashing BSY...");
-        fls_file_t *bsy = fls_open(cfg->bsy_path);
-        if (bsy) {
-            const fls_chunk_info_t *c = fls_find_chunk(bsy, FLS_TAG_IMAGE_DATA);
-            if (c) {
-                size_t sz = 0;
-                const uint8_t *data = fls_get_chunk_payload(bsy, c, &sz);
-                flasher_flash_image(s, data, sz, 0x20000000);
-            }
-            fls_close(bsy);
-        }
-    }
-
-    if (cfg->cds_path && strlen(cfg->cds_path) > 0) {
-        gui_log_async("[*] Flashing CDS: %s\n", cfg->cds_path);
-        gui_set_progress_async(0.85, "Flashing CDS...");
-        fls_file_t *cds = fls_open(cfg->cds_path);
-        if (cds) {
-            const fls_chunk_info_t *c = fls_find_chunk(cds, FLS_TAG_IMAGE_DATA);
-            if (c) {
-                size_t sz = 0;
-                const uint8_t *data = fls_get_chunk_payload(cds, c, &sz);
-                flasher_flash_image(s, data, sz, 0x21000000);
-            }
-            fls_close(cds);
-        }
-    }
-
-    if (cfg->dffs_path && strlen(cfg->dffs_path) > 0) {
-        gui_log_async("[*] Flashing CSC / DFFS: %s\n", cfg->dffs_path);
-        gui_set_progress_async(0.95, "Flashing DFFS...");
-        FILE *df = fopen(cfg->dffs_path, "rb");
-        if (df) {
-            fseek(df, 0, SEEK_END);
-            long sz = ftell(df);
-            rewind(df);
-            uint8_t *buf = (uint8_t *)malloc(sz);
-            if (buf && fread(buf, 1, sz, df) == (size_t)sz) {
-                flasher_flash_image(s, buf, sz, 0x22000000);
-            }
-            free(buf);
-            fclose(df);
-        }
-    }
-
-    gui_log_async("[*] Rebooting phone...\n");
-    flasher_reboot(s);
-    gui_set_progress_async(1.0, "Success / Download Complete!");
-    gui_log_async("[+] Flashing process completed successfully!\n");
     flasher_destroy(s);
 
 finish:
     if (trans) transport_destroy(trans);
     g_free(port);
     if (cfg->psi_path) free((void *)cfg->psi_path);
-    if (cfg->slb_path) free((void *)cfg->slb_path);
     if (cfg->bsy_path) free((void *)cfg->bsy_path);
     if (cfg->cds_path) free((void *)cfg->cds_path);
     if (cfg->dffs_path) free((void *)cfg->dffs_path);
@@ -422,7 +323,6 @@ typedef struct {
     char *port;
     uint32_t baudrate;
     bool is_usb;
-    bool use_open_psi;
     char *psi_path;
     char *out_path;
 } nvram_worker_args_t;
@@ -453,7 +353,6 @@ static void *worker_nvram_thread(void *arg) {
     flasher_config_t cfg = {0};
     cfg.is_usb = args->is_usb;
     cfg.baudrate = args->baudrate;
-    cfg.use_open_psi = args->use_open_psi;
     cfg.psi_path = args->psi_path;
 
     flasher_session_t *s = flasher_create(trans, &cfg);
@@ -462,48 +361,9 @@ static void *worker_nvram_thread(void *arg) {
         goto finish;
     }
 
-    gui_log_async("[*] Waiting for phone connection... (Hold Volume Down or reinsert battery)\n");
-    if (flasher_sync(s, 40) != 0) {
-        gui_log_async("[-] Device synchronization failed or timed out.\n");
-        flasher_destroy(s);
-        goto finish;
-    }
-    gui_set_progress_async(0.20, "Synchronized!");
-    gui_log_async("[+] Device synchronized!\n");
-
-    /* Upload PSI */
-    gui_set_progress_async(0.35, "Uploading PSI...");
-    if (args->use_open_psi || !args->psi_path || strlen(args->psi_path) == 0) {
-        gui_log_async("[*] Uploading built-in Open Rust PSI...\n");
-        if (flasher_upload_psi(s, NULL) != 0) {
-            gui_log_async("[-] Built-in PSI upload failed\n");
-            flasher_destroy(s);
-            goto finish;
-        }
-    } else {
-        gui_log_async("[*] Uploading custom PSI: %s\n", args->psi_path);
-        fls_file_t *psi = fls_open(args->psi_path);
-        int r = flasher_upload_psi(s, psi);
-        if (psi) fls_close(psi);
-        if (r != 0) {
-            gui_log_async("[-] Custom PSI upload failed\n");
-            flasher_destroy(s);
-            goto finish;
-        }
-    }
-
-    usleep(250000);
-    gui_set_progress_async(0.50, "Pinging OpenIFWD agent...");
-    if (flasher_open_ping(s) != 0) {
-        gui_log_async("[-] OpenIFWD agent ping failed\n");
-        flasher_destroy(s);
-        goto finish;
-    }
-    gui_log_async("[+] OpenIFWD agent responded to PING!\n");
-
-    gui_set_progress_async(0.60, "Dumping NVRAM (1MB)...");
+    gui_set_progress_async(0.30, "Dumping NVRAM (1MB)...");
     gui_log_async("[*] Reading NVRAM blocks 4..11 (0x60080000 - 0x60180000)...\n");
-    if (flasher_dump_nvram_open(s, args->out_path) != 0) {
+    if (flasher_dump_nvram(s, args->out_path) != 0) {
         gui_log_async("[-] Failed to dump NVRAM.\n");
         gui_set_progress_async(0.0, "NVRAM Dump Failed");
     } else {
@@ -529,7 +389,6 @@ typedef struct {
     char *port;
     uint32_t baudrate;
     bool is_usb;
-    bool use_open_psi;
     char *psi_path;
     char *payload_path;
     uint32_t target_addr;
@@ -606,7 +465,6 @@ static void *worker_ramboot_thread(void *arg) {
     flasher_config_t cfg = {0};
     cfg.is_usb = args->is_usb;
     cfg.baudrate = args->baudrate;
-    cfg.use_open_psi = args->use_open_psi;
     cfg.psi_path = args->psi_path;
 
     flasher_session_t *s = flasher_create(trans, &cfg);
@@ -615,48 +473,9 @@ static void *worker_ramboot_thread(void *arg) {
         goto finish;
     }
 
-    gui_log_async("[*] Waiting for phone connection... (Hold Volume Down or reinsert battery)\n");
-    if (flasher_sync(s, 40) != 0) {
-        gui_log_async("[-] Device synchronization failed or timed out.\n");
-        flasher_destroy(s);
-        goto finish;
-    }
-    gui_set_progress_async(0.20, "Synchronized!");
-    gui_log_async("[+] Device synchronized!\n");
-
-    /* Upload PSI */
-    gui_set_progress_async(0.35, "Uploading PSI...");
-    if (args->use_open_psi || !args->psi_path || strlen(args->psi_path) == 0) {
-        gui_log_async("[*] Uploading built-in Open Rust PSI...\n");
-        if (flasher_upload_psi(s, NULL) != 0) {
-            gui_log_async("[-] PSI upload failed\n");
-            flasher_destroy(s);
-            goto finish;
-        }
-    } else {
-        gui_log_async("[*] Uploading custom PSI: %s\n", args->psi_path);
-        fls_file_t *psi = fls_open(args->psi_path);
-        int r = flasher_upload_psi(s, psi);
-        if (psi) fls_close(psi);
-        if (r != 0) {
-            gui_log_async("[-] Custom PSI upload failed\n");
-            flasher_destroy(s);
-            goto finish;
-        }
-    }
-
-    usleep(250000);
-    gui_set_progress_async(0.50, "Pinging OpenIFWD agent...");
-    if (flasher_open_ping(s) != 0) {
-        gui_log_async("[-] OpenIFWD agent ping failed\n");
-        flasher_destroy(s);
-        goto finish;
-    }
-    gui_log_async("[+] OpenIFWD agent responded to PING!\n");
-
-    gui_set_progress_async(0.65, "Streaming to SDRAM...");
+    gui_set_progress_async(0.40, "Streaming to SDRAM...");
     gui_log_async("[*] Streaming payload (%zu bytes) to SDRAM at 0x%08X...\n", payload_len, args->target_addr);
-    if (flasher_boot_ram_open(s, args->target_addr, payload_buf, payload_len) != 0) {
+    if (flasher_boot_ram(s, args->target_addr, payload_buf, payload_len) != 0) {
         gui_log_async("[-] RAM boot execution failed.\n");
         gui_set_progress_async(0.0, "RAM Boot Failed");
     } else {
@@ -684,15 +503,17 @@ static void on_btn_start_clicked(GtkButton *btn, gpointer user_data) {
     if (g_app.is_running) return;
 
     flasher_config_t *cfg = (flasher_config_t *)calloc(1, sizeof(flasher_config_t));
-    cfg->use_open_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
+    gboolean builtin_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
     const char *psi_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_psi));
-    if (!cfg->use_open_psi && psi_txt && strlen(psi_txt) > 0) {
+    if (!builtin_psi && psi_txt && strlen(psi_txt) > 0) {
         cfg->psi_path = strdup(psi_txt);
     }
-    cfg->slb_path = strdup(gtk_entry_get_text(GTK_ENTRY(g_app.entry_slb)));
-    cfg->bsy_path = strdup(gtk_entry_get_text(GTK_ENTRY(g_app.entry_bsy)));
-    cfg->cds_path = strdup(gtk_entry_get_text(GTK_ENTRY(g_app.entry_cds)));
-    cfg->dffs_path = strdup(gtk_entry_get_text(GTK_ENTRY(g_app.entry_dffs)));
+    const char *bsy_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_bsy));
+    if (bsy_txt && strlen(bsy_txt) > 0) cfg->bsy_path = strdup(bsy_txt);
+    const char *cds_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_cds));
+    if (cds_txt && strlen(cds_txt) > 0) cfg->cds_path = strdup(cds_txt);
+    const char *dffs_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_dffs));
+    if (dffs_txt && strlen(dffs_txt) > 0) cfg->dffs_path = strdup(dffs_txt);
     cfg->erase_all = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_erase));
 
     const char *addr_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_ram_addr));
@@ -740,9 +561,9 @@ static void on_btn_backup_nvram_clicked(GtkButton *btn, gpointer user_data) {
     args->port = port ? strdup(port) : strdup("usb");
     args->baudrate = baud_str ? (uint32_t)atoi(baud_str) : 921600;
     args->is_usb = (strstr(args->port, "usb") != NULL || strstr(args->port, "USB") != NULL);
-    args->use_open_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
+    gboolean builtin_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
     const char *psi_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_psi));
-    if (!args->use_open_psi && psi_txt && strlen(psi_txt) > 0) {
+    if (!builtin_psi && psi_txt && strlen(psi_txt) > 0) {
         args->psi_path = strdup(psi_txt);
     }
     args->out_path = save_path;
@@ -783,9 +604,9 @@ static void on_btn_ramboot_clicked(GtkButton *btn, gpointer user_data) {
     args->port = port ? strdup(port) : strdup("usb");
     args->baudrate = baud_str ? (uint32_t)atoi(baud_str) : 921600;
     args->is_usb = (strstr(args->port, "usb") != NULL || strstr(args->port, "USB") != NULL);
-    args->use_open_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
+    gboolean builtin_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
     const char *psi_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_psi));
-    if (!args->use_open_psi && psi_txt && strlen(psi_txt) > 0) {
+    if (!builtin_psi && psi_txt && strlen(psi_txt) > 0) {
         args->psi_path = strdup(psi_txt);
     }
     args->payload_path = strdup(payload_path);
@@ -950,10 +771,9 @@ int main(int argc, char **argv) {
     gtk_widget_set_sensitive(g_app.entry_psi, FALSE);
     gtk_widget_set_sensitive(g_app.btn_browse_psi, FALSE);
 
-    add_grid_file_row(GTK_GRID(grid_files), 2, "2. SLB (*_slb.fls):", "Optional if using stock EBL...", &g_app.entry_slb, NULL, win);
-    add_grid_file_row(GTK_GRID(grid_files), 3, "3. BSY / Payload (*_BSY.fls or *.bin):", "Select baseband code or RAM binary...", &g_app.entry_bsy, NULL, win);
-    add_grid_file_row(GTK_GRID(grid_files), 4, "4. CDS (*_CDS.fls):", "Select *_CDS.fls file...", &g_app.entry_cds, NULL, win);
-    add_grid_file_row(GTK_GRID(grid_files), 5, "5. CSC (*.dffs):",    "Select *.dffs or CSC file...", &g_app.entry_dffs, NULL, win);
+    add_grid_file_row(GTK_GRID(grid_files), 2, "2. BSY / Payload (*_BSY.fls or *.bin):", "Select baseband code or RAM binary...", &g_app.entry_bsy, NULL, win);
+    add_grid_file_row(GTK_GRID(grid_files), 3, "3. CDS (*_CDS.fls):", "Select *_CDS.fls file...", &g_app.entry_cds, NULL, win);
+    add_grid_file_row(GTK_GRID(grid_files), 4, "4. CSC (*.dffs):",    "Select *.dffs or CSC file...", &g_app.entry_dffs, NULL, win);
 
     gtk_box_pack_start(GTK_BOX(main_box), frame_files, FALSE, FALSE, 0);
 
