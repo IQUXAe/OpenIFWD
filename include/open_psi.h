@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-extern const uint8_t open_psi_binary[5160];
+extern const uint8_t open_psi_binary[5340];
 extern const size_t open_psi_size;
 extern const uint8_t open_psi_checksum;
 

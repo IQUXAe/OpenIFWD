@@ -44,16 +44,20 @@ The bootstrapping sequence from device power-on proceeds in two stages:
    ```
 6. Host streams the PSI agent binary (up to 64 KB).
 7. Host sends 1-byte XOR-8 checksum of the payload.
-8. Boot ROM responds with ACK (`0x01`) and jumps to entry point at `0x00080000` in internal SRAM.
+8. Boot ROM responds with **two separate `0x01` packets** on EP 0x83:
+   - First `0x01`: Payload XOR-8 checksum verification confirmed.
+   - Second `0x01`: Execution handover confirmation, immediately before Boot ROM jumps to `0x00080000` in SRAM.
+   - *Host Note:* The host flasher MUST drain both `0x01` bytes to prevent USB IN FIFO desynchronization.
 
 ### Stage 2: OpenIFWD Session Handshake
-1. Once executing in SRAM, the OpenIFWD PSI agent sets up CPU clocks, initializes SDRAM, and exposes the OpenIFWD protocol over USB or UART.
-   - **USB Zero-Reset Session Inheritance:** On Intel/Infineon XMM2150, the PSI agent does not reset or re-enumerate the USB hardware core (retaining the existing `058b:0041` enumeration on the host PC). The agent preserves the Boot ROM SCU clock gate at `0xE4900900` (bit 3) and dispatches Bulk transfers via Boot ROM high vector calls:
-     - `0xFFFF0060`: `usb_bulk_read(void *buf, uint32_t len, uint32_t *transferred)` (EP 0x02 Bulk OUT)
-     - `0xFFFF0070`: `usb_bulk_write(const void *buf, uint32_t len, uint32_t *transferred)` (EP 0x83 Bulk IN)
+1. Once executing in SRAM at `0x00080000`:
+   - **Immediate Watchdog Timer Disable:** The SoC hardware Watchdog (`0xE4000000`) is active with a 1.0-second timeout. The agent unlocks `WDT_CON0` (`0xE4000024`) and clears `WDT_CON1` (`0xE4000028`) bit 2 within milliseconds to prevent a hardware reset.
+   - **CRT & BSS Initialization:** The agent clears `.bss` (`__bss_start__` to `__bss_end__`) and configures CP15 exception traps (`0xFFFF0000`).
+   - **USB Warm Handover:** Preserves the existing `058b:0041` USB session from Boot ROM (EP 2 Bulk OUT, EP 3 Bulk IN) without re-enumeration.
+   - **Non-blocking Endpoint Arming:** Arms EP 3 Bulk IN with the initial handshake token and simultaneously arms EP 2 Bulk OUT to receive the first OpenIFWD packet header.
 2. Host issues `CMD_PING` (`0x01`).
 3. PSI agent replies with `RSP_PONG` (`0x81`), indicating target readiness and protocol capabilities.
-4. Normal flash / memory operations can now be performed.
+4. Normal flash / memory operations can now be performed entirely via the clean-room OpenIFWD wire protocol (zero proprietary vendor blobs or EBL binaries).
 
 ---
 
