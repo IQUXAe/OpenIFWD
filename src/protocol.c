@@ -29,7 +29,7 @@ const char *ifwd_msg_name(uint16_t msg_type) {
         case IFWD_MSG_REQ_EXEC_FROM_RAM:   return "ReqExecuteFromRam";
         case IFWD_MSG_REQ_SEC_START:       return "ReqSecStart";
         case IFWD_MSG_REQ_SEC_END:         return "ReqSecEnd";
-        case IFWD_MSG_REQ_BOOTLOADER_VER:  return "ReqBootloaderVer";
+        case IFWD_MSG_RSP_SEC_START:       return "RspSecStart";
         case IFWD_MSG_REQ_FORCE_HW_RESET:  return "ReqForceHwReset";
         case IFWD_MSG_RSP_SEC_END:         return "RspSecEnd";
         case IFWD_MSG_RSP_CFI_INFO_1:      return "RspCfiInfo_1";
@@ -83,7 +83,7 @@ uint16_t ifwd_calc_crc16(const uint8_t *data, size_t len) {
     return crc;
 }
 
-uint16_t ifwd_calc_ebl_token(uint16_t msg_type, uint32_t length, const uint8_t *data) {
+uint16_t protocol_calc_checksum(uint16_t msg_type, uint32_t length, const uint8_t *data) {
     uint32_t sum = (uint32_t)msg_type + (length >> 16) + (length & 0xFFFF);
     if (data && length > 0) {
         for (size_t i = 0; i < length; i++) {
@@ -91,6 +91,10 @@ uint16_t ifwd_calc_ebl_token(uint16_t msg_type, uint32_t length, const uint8_t *
         }
     }
     return (uint16_t)(sum & 0xFFFF);
+}
+
+uint16_t ifwd_calc_ebl_token(uint16_t msg_type, uint32_t length, const uint8_t *data) {
+    return protocol_calc_checksum(msg_type, length, data);
 }
 
 size_t ifwd_build_packet(uint8_t channel, uint16_t msg_type,
@@ -149,4 +153,63 @@ int ifwd_parse_packet(const uint8_t *buf, size_t len,
     if (out_payload) *out_payload = buf + sizeof(ifwd_pkt_hdr_t);
 
     return (int)expected_total;
+}
+
+uint16_t openifwd_calc_crc16(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    if (!data) return crc;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+size_t openifwd_build_packet(uint8_t cmd, uint16_t seq, const void *payload, uint16_t len, uint8_t *out_buf, size_t max_len) {
+    size_t total_len = sizeof(openifwd_pkt_hdr_t) + len + (len > 0 ? sizeof(uint16_t) : 0);
+    if (!out_buf || max_len < total_len) return 0;
+
+    openifwd_pkt_hdr_t *hdr = (openifwd_pkt_hdr_t *)out_buf;
+    hdr->magic = OPENIFWD_MAGIC_32;
+    hdr->version = OPENIFWD_VERSION;
+    hdr->cmd = cmd;
+    hdr->seq = seq;
+    hdr->length = len;
+
+    /* Compute XOR-8 of bytes 0..9 (first 10 bytes of header) */
+    uint8_t chk = 0;
+    for (size_t i = 0; i < 10; i++) {
+        chk ^= out_buf[i];
+    }
+    hdr->header_checksum = chk;
+
+    if (payload && len > 0) {
+        memcpy(out_buf + sizeof(openifwd_pkt_hdr_t), payload, len);
+        uint16_t pcrc = openifwd_calc_crc16((const uint8_t *)payload, len);
+        memcpy(out_buf + sizeof(openifwd_pkt_hdr_t) + len, &pcrc, sizeof(uint16_t));
+    }
+
+    return total_len;
+}
+
+int openifwd_parse_header(const uint8_t *buf, size_t len, openifwd_pkt_hdr_t *out_hdr) {
+    if (!buf || len < sizeof(openifwd_pkt_hdr_t)) return -1;
+    const openifwd_pkt_hdr_t *hdr = (const openifwd_pkt_hdr_t *)buf;
+    if (hdr->magic != OPENIFWD_MAGIC_32) return -2;
+    if (hdr->version != OPENIFWD_VERSION) return -3;
+
+    uint8_t chk = 0;
+    for (size_t i = 0; i < 10; i++) {
+        chk ^= buf[i];
+    }
+    if (chk != hdr->header_checksum) return -4;
+
+    if (out_hdr) *out_hdr = *hdr;
+    return 0;
 }

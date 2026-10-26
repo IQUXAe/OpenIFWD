@@ -113,9 +113,12 @@ _Static_assert(sizeof(ifwd_req_prot_conf_t) == 28, "ifwd_req_prot_conf_t must be
 
 /* EBL 8-byte Packet Header (V3/V4 framing) */
 typedef struct __attribute__((packed)) {
-    uint16_t token;      /* e.g. 0x0576 for ReqSetProtConf */
+    union {
+        uint16_t checksum;   /* EBL mathematical packet checksum: sum = msg + (len>>16) + (len&0xFFFF) + sum(payload) */
+        uint16_t token;      /* Historic alias */
+    };
     uint16_t msg_type;   /* e.g. 0x0086 (ReqSetProtConf) */
-    uint32_t length;     /* 0x00000048 (72 bytes body length) */
+    uint32_t length;     /* Payload length */
 } ebl_pkt_hdr_t;
 _Static_assert(sizeof(ebl_pkt_hdr_t) == 8, "ebl_pkt_hdr_t must be 8 bytes");
 
@@ -141,8 +144,15 @@ _Static_assert(sizeof(ebl_req_prot_conf_t) == 72, "ebl_req_prot_conf_t must be 7
 
 /* EBL 8-byte RspSetProtConf Status (Frame 130) */
 typedef struct __attribute__((packed)) {
-    uint16_t msg_type;   /* 0x0089 (RspSetProtConf) */
-    uint16_t ack_type;   /* 0x0086 (Ack for ReqSetProtConf) */
+    union {
+        uint16_t checksum;   /* Response checksum (offset 0..1) */
+        uint16_t msg_type;   /* Historic alias */
+        uint16_t token;
+    };
+    union {
+        uint16_t ack_type;   /* Response opcode / ACK type (offset 2..3) */
+        uint16_t opcode;
+    };
     uint32_t status_len; /* 0x00000002 */
 } ebl_rsp_prot_conf_t;
 _Static_assert(sizeof(ebl_rsp_prot_conf_t) == 8, "ebl_rsp_prot_conf_t must be 8 bytes");
@@ -181,10 +191,14 @@ _Static_assert(sizeof(fls_sec_cfg_entry_t) == 16, "fls_sec_cfg_entry_t must be 1
 
 #pragma pack(pop)
 
+/* Message names and debug helpers */
+const char *ifwd_msg_name(uint16_t msg_type);
+
 /* Checksum and CRC functions */
 uint16_t ifwd_calc_xor16(const uint8_t *data, size_t len);
 uint16_t ifwd_calc_crc16(const uint8_t *data, size_t len);
 uint8_t  ifwd_calc_sum8(const uint8_t *data, size_t len);
+uint16_t protocol_calc_checksum(uint16_t msg_type, uint32_t length, const uint8_t *data);
 uint16_t ifwd_calc_ebl_token(uint16_t msg_type, uint32_t length, const uint8_t *data);
 
 /* Packet building & parsing */
@@ -195,7 +209,68 @@ size_t ifwd_build_packet(uint8_t channel, uint16_t msg_type,
 int ifwd_parse_packet(const uint8_t *buf, size_t len,
                       ifwd_pkt_hdr_t *out_hdr, const uint8_t **out_payload);
 
-const char *ifwd_msg_name(uint16_t msg_type);
+/* ========================================================================= */
+/* OpenIFWD Standard Protocol Definitions (Replaces proprietary EBL)         */
+/* ========================================================================= */
+#define OPENIFWD_MAGIC_32            0x4457464FU  /* "OFWD" little-endian */
+#define OPENIFWD_VERSION             0x01
+
+#define OPENIFWD_CMD_PING            0x01
+#define OPENIFWD_CMD_GET_HW_INFO     0x02
+#define OPENIFWD_CMD_ERASE_BLOCK     0x03
+#define OPENIFWD_CMD_WRITE_PAGE      0x04
+#define OPENIFWD_CMD_READ_PAGE       0x05
+#define OPENIFWD_CMD_MEM_WRITE       0x06
+#define OPENIFWD_CMD_MEM_READ        0x07
+#define OPENIFWD_CMD_EXEC_RAM        0x08
+#define OPENIFWD_CMD_REBOOT          0x09
+
+#define OPENIFWD_RSP_OK              0x80
+#define OPENIFWD_RSP_PONG            0x81
+#define OPENIFWD_RSP_HW_INFO         0x82
+#define OPENIFWD_RSP_PAGE_DATA       0x85
+#define OPENIFWD_RSP_MEM_DATA        0x87
+
+#define OPENIFWD_ERR_GENERIC         0xE0
+#define OPENIFWD_ERR_BAD_CRC         0xE1
+#define OPENIFWD_ERR_UNSUPPORTED     0xE2
+#define OPENIFWD_ERR_FLASH_LOCKED    0xE3
+#define OPENIFWD_ERR_FLASH_IO        0xE4
+#define OPENIFWD_ERR_NVRAM_PROTECT   0xE5
+#define OPENIFWD_ERR_BAD_ADDR        0xE6
+
+#pragma pack(push, 1)
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;           /* 'O','F','W','D' (0x4457464F) */
+    uint8_t  version;         /* 0x01 */
+    uint8_t  cmd;             /* OPENIFWD_CMD_* or OPENIFWD_RSP_* */
+    uint16_t seq;             /* Sequence ID */
+    uint16_t length;          /* Payload length */
+    uint8_t  header_checksum; /* XOR-8 checksum of preceding 10 bytes */
+} openifwd_pkt_hdr_t;
+_Static_assert(sizeof(openifwd_pkt_hdr_t) == 11, "openifwd_pkt_hdr_t must be 11 bytes");
+
+typedef struct __attribute__((packed)) {
+    uint32_t chip_id;
+    uint32_t cpu_freq_hz;
+    uint32_t sdram_base;
+    uint32_t sdram_size;
+    uint16_t onenand_mfr_id;
+    uint16_t onenand_dev_id;
+    uint32_t block_size;
+    uint16_t page_size;
+    uint16_t spare_size;
+    uint32_t total_blocks;
+} openifwd_hw_info_t;
+_Static_assert(sizeof(openifwd_hw_info_t) == 32, "openifwd_hw_info_t must be 32 bytes");
+
+#pragma pack(pop)
+
+/* OpenIFWD packet helpers */
+size_t openifwd_build_packet(uint8_t cmd, uint16_t seq, const void *payload, uint16_t len, uint8_t *out_buf, size_t max_len);
+int openifwd_parse_header(const uint8_t *buf, size_t len, openifwd_pkt_hdr_t *out_hdr);
+uint16_t openifwd_calc_crc16(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }
