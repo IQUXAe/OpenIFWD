@@ -8,6 +8,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
 #include <libusb-1.0/libusb.h>
 
 typedef struct {
@@ -21,6 +24,27 @@ typedef struct {
     size_t rx_head;
     size_t rx_tail;
 } usb_priv_t;
+
+static void usb_reset_host_ep(usb_priv_t *priv, uint8_t ep) {
+    if (!priv || !priv->dev_handle) return;
+    libusb_device *dev = libusb_get_device(priv->dev_handle);
+    if (!dev) return;
+    uint8_t bus = libusb_get_bus_number(dev);
+    uint8_t dev_addr = libusb_get_device_address(dev);
+    char dev_path[64];
+    snprintf(dev_path, sizeof(dev_path), "/dev/bus/usb/%03u/%03u", bus, dev_addr);
+
+    int fd = open(dev_path, O_RDWR);
+    if (fd >= 0) {
+        unsigned int ep_arg = ep;
+        if (ioctl(fd, USBDEVFS_RESETEP, &ep_arg) == 0) {
+            if (priv->verbose) {
+                printf("[*] Host endpoint 0x%02X reset via USBDEVFS_RESETEP\n", ep);
+            }
+        }
+        close(fd);
+    }
+}
 
 static void usb_hex_dump(const char *prefix, uint8_t ep, const uint8_t *data, size_t len) {
     printf("%s [EP 0x%02X] (%zu bytes):\n", prefix, ep, len);
@@ -207,6 +231,10 @@ static int usb_read(transport_t *t, void *buf, size_t count, int timeout_ms) {
         return 0;
     }
 
+    if (r == LIBUSB_ERROR_PIPE) {
+        usb_reset_host_ep(priv, priv->ep_in);
+    }
+
     fprintf(stderr, "[!] libusb bulk read error on EP 0x%02X: %s (code %d)\n",
             priv->ep_in, libusb_error_name(r), r);
     return -1;
@@ -230,6 +258,12 @@ static int usb_write(transport_t *t, const void *buf, size_t count) {
         int transferred = 0;
         int r = libusb_bulk_transfer(priv->dev_handle, priv->ep_out, (unsigned char *)(p + total_written), (int)chunk_len, &transferred, 30000);
         if (r != 0) {
+            if (r == LIBUSB_ERROR_PIPE) {
+                if (priv->verbose) {
+                    fprintf(stderr, "[!] EP 0x%02X reported LIBUSB_ERROR_PIPE, resetting host ring via USBDEVFS_RESETEP...\n", priv->ep_out);
+                }
+                usb_reset_host_ep(priv, priv->ep_out);
+            }
             fprintf(stderr, "[!] libusb bulk write error on EP 0x%02X: %s (code %d)\n",
                     priv->ep_out, libusb_error_name(r), r);
             return -1;
@@ -259,6 +293,14 @@ static int usb_flush(transport_t *t) {
 
     priv->rx_head = 0;
     priv->rx_tail = 0;
+
+    /* Reset host endpoint rings without sending control transfers to EP 0 */
+    if (priv->ep_out) {
+        usb_reset_host_ep(priv, priv->ep_out);
+    }
+    if (priv->ep_in) {
+        usb_reset_host_ep(priv, priv->ep_in);
+    }
 
     /* Drain any pending bytes on Bulk IN without touching EP 0x00 */
     if (priv->ep_in) {
