@@ -10,21 +10,24 @@
   - Full support for Infineon `.fls` (TLV Tag-Length-Value) files.
   - Parses and extracts all core chunks: Tag 1000 (Header), Tag 11 (PSI), Tag 14 (SLB/EBL), Tag 12 (Main Code / Flash), Tag 16 (TOC), Tag 18 (NVM), and Tag 21.
   - Built-in chunk unpacker (`openifwd unpack <file.fls>`).
-- **IFWD Protocol Implementation**:
-  - Reverse-engineered Infineon IFWD packet framing (`SOT=0x0200`).
-  - Implements XOR-16 and CRC-16 CCITT checksum verification.
-  - Automated `ATAT` synchronization with DTR/RTS serial handshaking.
-  - Dynamic baud rate switching (up to 921600 bps).
+- **Built-in Open Rust PSI & Standard OpenIFWD Protocol**:
+  - Embedded bare-metal Rust PSI (replaces proprietary 600 KB EBL blob).
+  - OpenIFWD wire protocol v1.0 specification (see [docs/OPENIFWD_PROTOCOL.md](docs/OPENIFWD_PROTOCOL.md)).
+  - Clean framing, CRC-16 payload verification, and hardware OneNAND/SDRAM control.
+  - Option to supply custom PSI binaries or `.fls` files via `--psi <path>`.
+- **Safe NVRAM / EEPROM Backup (`dump-nvram`)**:
+  - Dumps critical 1 MB NVRAM partition (IMEI, RF calibrations, board data) from OneNAND blocks 4..11.
+  - Hardware write-protection preventing accidental NVRAM overwrite or corruption.
 - **Dual Transport Layer**:
   - Standard Linux serial TTY (`/dev/ttyACM*`, `/dev/ttyUSB*`) via POSIX `termios`.
   - Direct USB transport via `libusb-1.0` (bulk endpoints).
-- **RAM Booting**:
-  - Ability to inject and execute code directly in **SDRAM** (`ram-boot`) without writing or erasing flash memory.
+- **RAM Booting & Kernel Execution**:
+  - Ability to stream and execute bare-metal code directly in **SDRAM** (`ram-boot`, default `0x60000000`) without writing flash memory.
 - **Full Flash Programming**:
   - Flash ID detection, full/selective erase, block-by-block download, CRC verification, and hardware reset.
 - **Two User Interfaces**:
   - Scriptable command-line interface (`openifwd`).
-  - Modern GTK 3 desktop GUI (`openifwd-gui`) with real-time log, progress bar, port scanner, and Wayland compatibility.
+  - Modern GTK 3 desktop GUI (`openifwd-gui`) with real-time log, progress bar, port scanner, NVRAM backup button, and SDRAM exec controls.
 
 ---
 
@@ -94,16 +97,26 @@ Launch the GUI application:
 ./openifwd scan
 ```
 
-#### RAM Boot (Execute in SDRAM without touching flash):
+#### Safe NVRAM Backup (IMEI & RF Calibration):
 ```bash
-./openifwd ram-boot -p /dev/ttyACM0 \
-    --psi S5222XXMJ1_psi.fls \
-    --bin custom_payload.bin \
-    --addr 0x20000000
+./openifwd dump-nvram -p usb -o s5222_nvram_backup.bin
 ```
 
-#### Full Flash (Samsung Star 3 / GT-S5222):
+#### RAM Boot (Execute in SDRAM using built-in Open PSI):
 ```bash
+./openifwd ram-boot -p usb \
+    --bin my_kernel.bin \
+    --addr 0x60000000
+```
+
+#### Flash Firmware:
+```bash
+# Using default built-in Open PSI:
+./openifwd flash -p usb \
+    --bsy S5222XXMJ1_BSY.fls \
+    --cds S5222XXMJ1_CDS.fls
+
+# Or using stock/custom PSI:
 ./openifwd flash -p /dev/ttyACM0 \
     --psi S5222XXMJ1_psi.fls \
     --slb S5222XXMJ1_slb.fls \
