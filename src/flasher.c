@@ -106,6 +106,79 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
     return 0;
 }
 
+static uint8_t *load_custom_psi(const char *psi_path, size_t *out_size, uint8_t *out_chk) {
+    if (!psi_path || strlen(psi_path) == 0) return NULL;
+
+    uint8_t *allocated_psi = NULL;
+    size_t psi_size = 0;
+
+    if (strstr(psi_path, ".fls") || strstr(psi_path, ".FLS")) {
+        fls_file_t *pf = fls_open(psi_path);
+        if (pf) {
+            const fls_chunk_info_t *chunk = fls_find_chunk(pf, FLS_TAG_RPSI);
+            if (!chunk) chunk = fls_find_chunk(pf, FLS_TAG_IMAGE_DATA);
+            size_t raw_size = 0;
+            const uint8_t *raw_data = NULL;
+            if (chunk) {
+                raw_data = fls_get_chunk_payload(pf, chunk, &raw_size);
+                if (raw_data && raw_size > 20) {
+                    uint32_t sub_len = *(const uint32_t *)(raw_data + 8);
+                    if (sub_len > 0 && sub_len <= raw_size - 20 && sub_len <= 0xFFFF) {
+                        allocated_psi = (uint8_t *)malloc(sub_len);
+                        if (allocated_psi) {
+                            memcpy(allocated_psi, raw_data + 20, sub_len);
+                            psi_size = sub_len;
+                        }
+                    }
+                }
+                if (!allocated_psi && raw_data && raw_size <= 0xFFFF) {
+                    allocated_psi = (uint8_t *)malloc(raw_size);
+                    if (allocated_psi) {
+                        memcpy(allocated_psi, raw_data, raw_size);
+                        psi_size = raw_size;
+                    }
+                }
+            }
+            fls_close(pf);
+        }
+    }
+
+    if (!allocated_psi) {
+        FILE *raw_psi_f = fopen(psi_path, "rb");
+        if (raw_psi_f) {
+            fseek(raw_psi_f, 0, SEEK_END);
+            long sz = ftell(raw_psi_f);
+            rewind(raw_psi_f);
+            if (sz > 0 && sz <= 0xFFFF) {
+                allocated_psi = (uint8_t *)malloc((size_t)sz);
+                if (allocated_psi) {
+                    if (fread(allocated_psi, 1, (size_t)sz, raw_psi_f) == (size_t)sz) {
+                        psi_size = (size_t)sz;
+                    } else {
+                        free(allocated_psi);
+                        allocated_psi = NULL;
+                    }
+                }
+            }
+            fclose(raw_psi_f);
+        }
+    }
+
+    if (allocated_psi && psi_size > 0) {
+        uint8_t chk8 = 0;
+        for (size_t i = 0; i < psi_size; i++) {
+            chk8 ^= allocated_psi[i];
+        }
+        *out_size = psi_size;
+        *out_chk = chk8;
+        printf("[*] Loaded custom PSI binary from %s (%zu bytes, XOR-8 0x%02X)...\n",
+               psi_path, psi_size, chk8);
+        return allocated_psi;
+    }
+
+    return NULL;
+}
+
 int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     if (!s) return -1;
 
@@ -145,61 +218,9 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
 
     uint8_t *allocated_psi = NULL;
     if (!psi_data && s->config.psi_path && strlen(s->config.psi_path) > 0) {
-        if (strstr(s->config.psi_path, ".fls") || strstr(s->config.psi_path, ".FLS")) {
-            fls_file_t *pf = fls_open(s->config.psi_path);
-            if (pf) {
-                const fls_chunk_info_t *chunk = fls_find_chunk(pf, FLS_TAG_RPSI);
-                if (!chunk) chunk = fls_find_chunk(pf, FLS_TAG_IMAGE_DATA);
-                size_t raw_size = 0;
-                const uint8_t *raw_data = NULL;
-                if (chunk) {
-                    raw_data = fls_get_chunk_payload(pf, chunk, &raw_size);
-                    if (raw_data && raw_size > 20) {
-                        uint32_t sub_len = *(const uint32_t *)(raw_data + 8);
-                        if (sub_len > 0 && sub_len <= raw_size - 20 && sub_len <= 0xFFFF) {
-                            allocated_psi = (uint8_t *)malloc(sub_len);
-                            if (allocated_psi) {
-                                memcpy(allocated_psi, raw_data + 20, sub_len);
-                                psi_data = allocated_psi;
-                                psi_size = sub_len;
-                            }
-                        }
-                    }
-                    if (!psi_data && raw_data && raw_size <= 0xFFFF) {
-                        allocated_psi = (uint8_t *)malloc(raw_size);
-                        if (allocated_psi) {
-                            memcpy(allocated_psi, raw_data, raw_size);
-                            psi_data = allocated_psi;
-                            psi_size = raw_size;
-                        }
-                    }
-                }
-                fls_close(pf);
-            }
-        }
-        if (!psi_data) {
-            FILE *raw_psi_f = fopen(s->config.psi_path, "rb");
-            if (raw_psi_f) {
-                fseek(raw_psi_f, 0, SEEK_END);
-                long sz = ftell(raw_psi_f);
-                rewind(raw_psi_f);
-                if (sz > 0 && sz <= 0xFFFF) {
-                    allocated_psi = (uint8_t *)malloc((size_t)sz);
-                    if (allocated_psi && fread(allocated_psi, 1, (size_t)sz, raw_psi_f) == (size_t)sz) {
-                        psi_data = allocated_psi;
-                        psi_size = (size_t)sz;
-                    }
-                }
-                fclose(raw_psi_f);
-            }
-        }
-        if (psi_data) {
-            chk8 = 0;
-            for (size_t i = 0; i < psi_size; i++) {
-                chk8 ^= psi_data[i];
-            }
-            printf("[*] Loaded custom PSI binary from %s (%zu bytes, XOR-8 0x%02X)...\n",
-                   s->config.psi_path, psi_size, chk8);
+        allocated_psi = load_custom_psi(s->config.psi_path, &psi_size, &chk8);
+        if (allocated_psi) {
+            psi_data = allocated_psi;
         }
     }
 
@@ -518,11 +539,26 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
     printf("[+] Device synchronized with Boot ROM!\n");
 
     /* 2. Upload Stock PSI (Stage 1) */
-    const uint8_t *psi_data = stock_psi_binary;
-    size_t psi_size = stock_psi_size;
-    uint8_t psi_chk = stock_psi_checksum;
+    uint8_t *allocated_psi = NULL;
+    const uint8_t *psi_data = NULL;
+    size_t psi_size = 0;
+    uint8_t psi_chk = 0;
 
-    printf("[*] Preparing Stock PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
+    if (s->config.psi_path && strlen(s->config.psi_path) > 0) {
+        allocated_psi = load_custom_psi(s->config.psi_path, &psi_size, &psi_chk);
+        if (allocated_psi) {
+            psi_data = allocated_psi;
+            printf("[*] Preparing Custom PSI Stage 1 from %s (%zu bytes, XOR-8 0x%02X)...\n",
+                   s->config.psi_path, psi_size, psi_chk);
+        }
+    }
+
+    if (!psi_data) {
+        psi_data = stock_psi_binary;
+        psi_size = stock_psi_size;
+        psi_chk = stock_psi_checksum;
+        printf("[*] Preparing Stock PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
+    }
 
     uint8_t boot_hdr[3];
     boot_hdr[0] = 0x30;
@@ -531,18 +567,21 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
 
     if (transport_write(s->transport, boot_hdr, 3) != 3) {
         fprintf(stderr, "[-] Failed to write Boot ROM 0x30 header\n");
+        if (allocated_psi) free(allocated_psi);
         return -1;
     }
 
-    printf("[*] Streaming %zu bytes of Stock PSI to SRAM at 0x00080000...\n", psi_size);
+    printf("[*] Streaming %zu bytes of PSI binary to SRAM at 0x00080000...\n", psi_size);
     if (transport_write(s->transport, psi_data, psi_size) != (int)psi_size) {
         fprintf(stderr, "[-] Failed to stream PSI binary\n");
+        if (allocated_psi) free(allocated_psi);
         return -1;
     }
 
     printf("[*] Sending XOR-8 checksum: 0x%02X\n", psi_chk);
     if (transport_write(s->transport, &psi_chk, 1) != 1) {
         fprintf(stderr, "[-] Failed to send PSI checksum\n");
+        if (allocated_psi) free(allocated_psi);
         return -1;
     }
 
@@ -560,7 +599,13 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
         usleep(50000);
     } else {
         fprintf(stderr, "[-] Unexpected Boot ROM ACK (%d bytes, 0x%02X)\n", r, ack_buf[0]);
+        if (allocated_psi) free(allocated_psi);
         return -1;
+    }
+
+    if (allocated_psi) {
+        free(allocated_psi);
+        allocated_psi = NULL;
     }
 
     /* 3. Wait for Stock PSI Readiness Token (0x00 0xAA) on EP 0x83 */
