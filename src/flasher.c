@@ -633,8 +633,12 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
     return -1;
 }
 
-int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const char *out_path) {
+int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const char *out_path, uint32_t chunk_size) {
     if (!s || !out_path || len == 0) return -1;
+
+    if (chunk_size == 0 || chunk_size > 2048) {
+        chunk_size = 2048;
+    }
 
     FILE *fout = fopen(out_path, "wb");
     if (!fout) {
@@ -646,6 +650,7 @@ int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const
     printf("[*] Starting Hardware Memory Extraction via Standalone RAM Dumper\n");
     printf("[*] Target Range: 0x%08X - 0x%08X (%u KB / %u bytes)\n",
            addr, addr + len, (len + 1023) / 1024, len);
+    printf("[*] Chunk Size:   %u bytes\n", chunk_size);
     printf("[*] Output File:  %s\n", out_path);
     printf("================================================================================\n");
 
@@ -655,9 +660,11 @@ int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const
         return -1;
     }
 
-    const uint32_t chunk_size = 2048; /* 2 KB per chunk */
     uint32_t offset = 0;
     uint8_t rx_buf[2048];
+
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     while (offset < len) {
         uint32_t req_len = len - offset;
@@ -696,28 +703,39 @@ int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const
         }
 
         offset += req_len;
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+        double speed_kb = (elapsed > 0.05) ? ((offset / 1024.0) / elapsed) : 0.0;
         int pct = (int)((offset * 100ULL) / len);
-        printf("\r[*] Memory Dump Progress: %3d%% (0x%08X / 0x%08X, %u KB)",
-               pct, addr + offset, addr + len, offset / 1024);
+        printf("\r[*] Memory Dump Progress: %3d%% (0x%08X / 0x%08X, %u KB, %.1f KB/s)   ",
+               pct, addr + offset, addr + len, offset / 1024, speed_kb);
         fflush(stdout);
     }
 
     fclose(fout);
-    printf("\n[+] Successfully dumped %u bytes from 0x%08X to %s!\n\n", len, addr, out_path);
 
-    /* If dumping Boot ROM (0x00000000), validate Reset Vector */
-    if (addr == 0x00000000 && len >= 4) {
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    double total_time = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    double avg_speed = (total_time > 0.05) ? ((len / 1024.0) / total_time) : 0.0;
+    printf("\n[+] Successfully dumped %u bytes from 0x%08X to %s (%.2f s, %.1f KB/s)!\n\n",
+           len, addr, out_path, total_time, avg_speed);
+
+    /* If dumping Boot ROM or High Vectors (0x00000000 or 0xFFFF0000), validate Reset Vector */
+    if ((addr == 0x00000000 || addr == 0xFFFF0000) && len >= 4) {
         FILE *vf = fopen(out_path, "rb");
         if (vf) {
             uint32_t reset_vec = 0;
             if (fread(&reset_vec, 1, 4, vf) == 4) {
-                printf("[*] Boot ROM Reset Vector at 0x00000000: 0x%08X\n", reset_vec);
+                printf("[*] Reset Vector at 0x%08X: 0x%08X\n", addr, reset_vec);
                 if ((reset_vec & 0xFF000000) == 0xEA000000) {
                     uint32_t target_branch = (reset_vec & 0x00FFFFFF);
-                    uint32_t abs_target = (target_branch << 2) + 8;
+                    uint32_t abs_target = (target_branch << 2) + 8 + addr;
                     printf("[+] Valid ARM Branch instruction detected (branches to 0x%08X)!\n", abs_target);
                 } else if ((reset_vec & 0xFFFF0000) == 0xE59F0000) {
-                    printf("[+] Valid ARM LDR PC instruction detected at 0x00000000!\n");
+                    printf("[+] Valid ARM LDR PC instruction detected at 0x%08X!\n", addr);
                 }
             }
             fclose(vf);
@@ -727,12 +745,110 @@ int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const
     return 0;
 }
 
+int flasher_dump_nand(flasher_session_t *s, uint32_t start_block, uint32_t block_count, const char *out_path) {
+    if (!s || !out_path || block_count == 0) return -1;
+    if (start_block + block_count > 1024) {
+        fprintf(stderr, "[-] Error: block range %u..%u exceeds 1024 total blocks\n",
+                start_block, start_block + block_count - 1);
+        return -1;
+    }
+
+    FILE *fout = fopen(out_path, "wb");
+    if (!fout) {
+        fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
+        return -1;
+    }
+
+    uint32_t total_pages = block_count * 64;
+    uint32_t total_bytes = total_pages * 2048;
+
+    printf("\n================================================================================\n");
+    printf("[*] Starting OneNAND Physical Flash Extraction via Standalone RAM Dumper\n");
+    printf("[*] Block Range:  %u - %u (%u blocks, %u pages, %u KB / %u MB)\n",
+           start_block, start_block + block_count - 1, block_count, total_pages,
+           total_bytes / 1024, total_bytes / (1024 * 1024));
+    printf("[*] Output File:  %s\n", out_path);
+    printf("================================================================================\n");
+
+    /* Start RAM Dumper if not already running */
+    if (flasher_start_ram_dumper(s) != 0) {
+        fclose(fout);
+        return -1;
+    }
+
+    uint8_t page_buf[2048];
+    uint32_t pages_done = 0;
+
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    for (uint32_t b = 0; b < block_count; b++) {
+        uint32_t block = start_block + b;
+
+        for (uint32_t page = 0; page < 64; page++) {
+            /* Build 16-byte command: MAGIC_CMD_NAND_READ (0x444E414E), block, page (0..63), checksum */
+            uint32_t cmd_buf[4];
+            cmd_buf[0] = 0x444E414E; /* "NAND" */
+            cmd_buf[1] = block;
+            cmd_buf[2] = page; /* Pass page number 0..63 */
+            cmd_buf[3] = cmd_buf[0] ^ cmd_buf[1] ^ cmd_buf[2];
+
+            if (transport_write(s->transport, cmd_buf, 16) != 16) {
+                fprintf(stderr, "\n[-] Failed to send NAND READ command (block %u, page %u)\n", block, page);
+                fclose(fout);
+                return -1;
+            }
+
+            /* Read 2048 bytes from EP 0x83 */
+            uint32_t read_bytes = 0;
+            while (read_bytes < 2048) {
+                int n = transport_read(s->transport, page_buf + read_bytes, 2048 - read_bytes, 4000);
+                if (n <= 0) {
+                    fprintf(stderr, "\n[-] Timeout reading NAND page (block %u, page %u, got %u / 2048 bytes)\n",
+                            block, page, read_bytes);
+                    fclose(fout);
+                    return -1;
+                }
+                read_bytes += (uint32_t)n;
+            }
+
+            if (fwrite(page_buf, 1, 2048, fout) != 2048) {
+                fprintf(stderr, "\n[-] Failed to write page to output file\n");
+                fclose(fout);
+                return -1;
+            }
+
+            pages_done++;
+
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+            double speed_kb = (elapsed > 0.05) ? (((pages_done * 2048.0) / 1024.0) / elapsed) : 0.0;
+            int pct = (int)((pages_done * 100ULL) / total_pages);
+            printf("\r[*] NAND Dump Progress: %3d%% (Block %4u/%4u, Page %2u/64, %u KB, %.1f KB/s)   ",
+                   pct, block, start_block + block_count - 1, page, (pages_done * 2048) / 1024, speed_kb);
+            fflush(stdout);
+        }
+    }
+
+    fclose(fout);
+
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    double total_time = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    double avg_speed = (total_time > 0.05) ? ((total_bytes / 1024.0) / total_time) : 0.0;
+    printf("\n[+] Successfully dumped %u bytes (%u blocks) to %s (%.2f s, %.1f KB/s)!\n\n",
+           total_bytes, block_count, out_path, total_time, avg_speed);
+
+    return 0;
+}
+
 int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
-    return flasher_dump_memory(s, 0x00000000, 0x00010000, out_path);
+    return flasher_dump_memory(s, 0x00000000, 0x00010000, out_path, 2048);
 }
 
 int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
-    return flasher_dump_memory(s, 0x60080000, 0x00100000, out_path);
+    return flasher_dump_memory(s, 0x60080000, 0x00100000, out_path, 2048);
 }
 
 int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *data, size_t size) {

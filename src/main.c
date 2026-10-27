@@ -73,12 +73,19 @@ static void print_usage(const char *prog) {
     printf("  scan                              Scan for connected phone TTY ports\n");
     printf("  dump-bootrom -p <port> [-o <file>] Extract 64KB Boot ROM (PMB8815 silicon ROM)\n");
     printf("  dump-nvram -p <port> [-o <file>]  Safely backup 1MB NVRAM/EEPROM (IMEI & RF calibrations)\n");
-    printf("  dump-mem   -p <port> -a <hex> -l <hex> [-o <file>] Read arbitrary memory range via RAM Dumper\n");
+    printf("  dump-nand  -p <port> -b <block> -c <count> -o <file> Dump raw OneNAND physical flash blocks\n");
+    printf("  dump-memory -p <port> -a <hex> -l <len> -o <file> [-c <chunk>] Read arbitrary memory range\n");
+    printf("  dump-mem   -p <port> -a <hex> -l <len> [-o <file>] Alias for dump-memory\n");
     printf("  ram-boot   -p <port> --bin <file> [--addr 0x60000000] Load & execute binary directly in SDRAM\n");
     printf("  flash    [options]                Flash Samsung Star 3 (GT-S5222)\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
-    printf("  -o, --out <file>        Output file for dumps (default: bootrom_pmb8815.bin / s5222_nvram_backup.bin)\n");
+    printf("  -o, --out, --output <file> Output file for dumps (default: bootrom_pmb8815.bin / s5222_nvram_backup.bin)\n");
+    printf("  -b, --block, --start-block <num> Starting block for NAND dump (0..1023)\n");
+    printf("  -c, --count, --block-count <num> Number of blocks to dump (default: 1)\n");
+    printf("  -a, --addr, --address <hex> Base address for memory dump (e.g. 0xFFFF0000, 0x60080000)\n");
+    printf("  -l, --len, --length <len>   Length in bytes for memory dump (hex e.g. 0x10000 or decimal)\n");
+    printf("  -c, --chunk, --chunk-size <size> Chunk size in bytes (default: 2048, max: 2048)\n");
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
     printf("  --psi <file.bin/fls>    Custom PSI file (default: built-in Open Rust PSI)\n");
@@ -93,6 +100,10 @@ static void print_usage(const char *prog) {
     printf("Examples:\n");
     printf("  %s dump-bootrom -p usb -o bootrom_pmb8815.bin -v\n", prog);
     printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
+    printf("  %s dump-nand -p usb -b 0 -c 1 -o nand_block0_boot.bin -v\n", prog);
+    printf("  %s dump-nand -p usb -b 4 -c 8 -o nand_nvram_backup.bin -v\n", prog);
+    printf("  %s dump-memory -p usb -a 0xFFFF0000 -l 0x10000 -o bootrom_high.bin -v\n", prog);
+    printf("  %s dump-memory -p usb -a 0x60080000 -l 0x100000 -o nvram_backup.bin -v\n", prog);
     printf("  %s ram-boot -p usb --bin my_os.bin --addr 0x60000000\n", prog);
     printf("  %s flash -p usb --bsy S5222_BSY.fls --cds S5222_CDS.fls\n", prog);
     printf("====================================================================\n");
@@ -436,33 +447,134 @@ int main(int argc, char **argv) {
         return res;
     }
 
-    if (strcmp(cmd, "dump-mem") == 0) {
+    if (strcmp(cmd, "dump-memory") == 0 || strcmp(cmd, "dump-mem") == 0) {
         const char *port = NULL;
         const char *out_path = "mem_dump.bin";
         uint32_t addr = 0x00000000;
         uint32_t len = 0x10000;
+        uint32_t chunk_size = 2048;
+        bool addr_set = false;
+        bool len_set = false;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.baudrate = 921600;
 
         static struct option long_options[] = {
-            {"port",      required_argument, 0, 'p'},
-            {"addr",      required_argument, 0, 'a'},
-            {"len",       required_argument, 0, 'l'},
-            {"psi",       required_argument, 0, 1001},
-            {"out",       required_argument, 0, 'o'},
-            {"verbose",   no_argument,       0, 'v'},
-            {"help",      no_argument,       0, 'h'},
+            {"port",       required_argument, 0, 'p'},
+            {"addr",       required_argument, 0, 'a'},
+            {"address",    required_argument, 0, 'a'},
+            {"len",        required_argument, 0, 'l'},
+            {"length",     required_argument, 0, 'l'},
+            {"out",        required_argument, 0, 'o'},
+            {"output",     required_argument, 0, 'o'},
+            {"chunk",      required_argument, 0, 'c'},
+            {"chunk-size", required_argument, 0, 'c'},
+            {"psi",        required_argument, 0, 1001},
+            {"verbose",    no_argument,       0, 'v'},
+            {"help",       no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:a:l:o:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:a:l:o:c:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
-                case 'a': addr = (uint32_t)strtoul(optarg, NULL, 0); break;
-                case 'l': len = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'a': addr = (uint32_t)strtoul(optarg, NULL, 0); addr_set = true; break;
+                case 'l': len = (uint32_t)strtoul(optarg, NULL, 0); len_set = true; break;
+                case 'o': out_path = optarg; break;
+                case 'c': chunk_size = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        if (!port) {
+            fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
+            return 1;
+        }
+
+        if (!addr_set) {
+            fprintf(stderr, "[-] Error: Address is required (-a <HEX_ADDR>, e.g. -a 0xFFFF0000)\n");
+            return 1;
+        }
+
+        if (!len_set || len == 0) {
+            fprintf(stderr, "[-] Error: Length is required (-l <HEX_OR_DEC_LEN>, e.g. -l 0x10000 or -l 65536)\n");
+            return 1;
+        }
+
+        if (chunk_size == 0) {
+            chunk_size = 2048;
+        }
+        if (chunk_size > 2048) {
+            printf("[*] Capping chunk size to 2048 bytes (maximum supported by USB DMA buffer)\n");
+            chunk_size = 2048;
+        }
+
+        cfg.is_usb = (strcmp(port, "usb") == 0);
+
+        transport_t *trans = NULL;
+        if (cfg.is_usb) {
+            trans = transport_create_usb();
+            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
+                fprintf(stderr, "[-] Failed to open direct USB interface\n");
+                if (trans) transport_destroy(trans);
+                return 1;
+            }
+        } else {
+            trans = transport_create_tty();
+            if (!trans || transport_open(trans, port, 115200) != 0) {
+                fprintf(stderr, "[-] Failed to open port %s\n", port);
+                if (trans) transport_destroy(trans);
+                return 1;
+            }
+        }
+
+        if (cfg.verbose) {
+            transport_set_verbose(trans, true);
+        }
+
+        flasher_session_t *session = flasher_create(trans, &cfg);
+        int res = flasher_dump_memory(session, addr, len, out_path, chunk_size);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "dump-nand") == 0) {
+        const char *port = NULL;
+        const char *out_path = "nand_dump.bin";
+        uint32_t start_block = 0;
+        uint32_t block_count = 1;
+        bool block_set = false;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",        required_argument, 0, 'p'},
+            {"block",       required_argument, 0, 'b'},
+            {"start-block", required_argument, 0, 'b'},
+            {"count",       required_argument, 0, 'c'},
+            {"block-count", required_argument, 0, 'c'},
+            {"out",         required_argument, 0, 'o'},
+            {"output",      required_argument, 0, 'o'},
+            {"psi",         required_argument, 0, 1001},
+            {"verbose",     no_argument,       0, 'v'},
+            {"help",        no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:b:c:o:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'b': start_block = (uint32_t)strtoul(optarg, NULL, 0); block_set = true; break;
+                case 'c': block_count = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 'v': cfg.verbose = true; break;
@@ -473,6 +585,22 @@ int main(int argc, char **argv) {
 
         if (!port) {
             fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
+            return 1;
+        }
+
+        if (!block_set) {
+            fprintf(stderr, "[-] Error: Start block is required (-b <START_BLOCK>, e.g. -b 0)\n");
+            return 1;
+        }
+
+        if (block_count == 0) {
+            fprintf(stderr, "[-] Error: Block count must be greater than 0 (-c <COUNT>)\n");
+            return 1;
+        }
+
+        if (start_block + block_count > 1024) {
+            fprintf(stderr, "[-] Error: Start block (%u) + count (%u) exceeds 1024 total blocks (128MB OneNAND)\n",
+                    start_block, block_count);
             return 1;
         }
 
@@ -500,7 +628,7 @@ int main(int argc, char **argv) {
         }
 
         flasher_session_t *session = flasher_create(trans, &cfg);
-        int res = flasher_dump_memory(session, addr, len, out_path);
+        int res = flasher_dump_nand(session, start_block, block_count, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;
