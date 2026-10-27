@@ -618,7 +618,7 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
     /* 9. Read RAM Dumper Hello Beacon ("RDMP") on EP 0x83 */
     printf("[*] Waiting for RAM Dumper agent beacon on EP 0x83...\n");
     uint8_t hello_buf[16] = {0};
-    int hn = transport_read(s->transport, hello_buf, 16, 3000);
+    int hn = transport_read(s->transport, hello_buf, 16, 5000);
     if (hn >= 4) {
         uint32_t magic = *(uint32_t *)(hello_buf + 0);
         if (magic == 0x504D4452) { /* "RDMP" */
