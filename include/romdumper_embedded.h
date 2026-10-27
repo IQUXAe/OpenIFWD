@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-extern const uint8_t romdumper_binary[1584];
+extern const uint8_t romdumper_binary[1608];
 extern const size_t romdumper_size;
 extern const uint8_t romdumper_checksum;
 
