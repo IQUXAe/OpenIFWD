@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "transport.h"
 #include "open_psi.h"
+#include "ram_dumper_embedded.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,6 +74,8 @@ int flasher_open_exec_ram(flasher_session_t *s, uint32_t entry_addr);
 int flasher_open_reboot(flasher_session_t *s);
 
 /* High-Level User Operations */
+int flasher_start_ram_dumper(flasher_session_t *s);
+int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const char *out_path);
 int flasher_dump_bootrom(flasher_session_t *s, const char *out_path);
 int flasher_dump_nvram(flasher_session_t *s, const char *out_path);
 int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *data, size_t size);

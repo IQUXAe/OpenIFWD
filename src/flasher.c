@@ -4,6 +4,7 @@
 #include "flasher.h"
 #include "open_psi.h"
 #include "romdumper_embedded.h"
+#include "ram_dumper_embedded.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -203,10 +204,10 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     }
 
     if (!psi_data) {
-        psi_data = open_psi_binary;
-        psi_size = open_psi_size;
-        chk8 = open_psi_checksum;
-        printf("[*] Using built-in Open Rust PSI for ARM926EJ-S (%zu bytes, XOR-8 0x%02X)...\n", psi_size, chk8);
+        psi_data = stock_psi_binary;
+        psi_size = stock_psi_size;
+        chk8 = stock_psi_checksum;
+        printf("[*] Using built-in Stock PSI for PMB8815 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, chk8);
     }
 
     /* Boot ROM Header: Command 0x30, length uint16_le */
@@ -492,67 +493,55 @@ int flasher_connect_agent(flasher_session_t *s) {
     return 0;
 }
 
-int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
-    if (!s || !out_path) return -1;
+int flasher_start_ram_dumper(flasher_session_t *s) {
+    if (!s || !s->transport) return -1;
 
-    printf("\n================================================================================\n");
-    printf("[*] Starting Hardware Boot ROM Extraction\n");
-    printf("[*] Target: PMB8815 / X-Gold 215 Boot ROM (64 KB @ 0x00000000)\n");
-    printf("[*] Output File:   %s\n", out_path);
-    printf("================================================================================\n");
-
-    /* 1. Sync handshake with Boot ROM */
+    /* 1. Synchronize with Boot ROM */
     if (flasher_sync(s, 40) != 0) return -1;
 
-    /* Clean leftover FIFO before PSI upload matching flasher_upload_psi */
     usleep(20000);
     transport_flush(s->transport);
-    printf("[+] Device synchronized successfully!\n");
+    printf("[+] Device synchronized with Boot ROM!\n");
 
-    /* 2. Upload Open PSI (with embedded Boot ROM Dumper) */
-    const uint8_t *dumper_data = open_psi_binary;
-    size_t dumper_size = open_psi_size;
-    uint8_t chk8 = open_psi_checksum;
+    /* 2. Upload Stock PSI (Stage 1) */
+    const uint8_t *psi_data = stock_psi_binary;
+    size_t psi_size = stock_psi_size;
+    uint8_t psi_chk = stock_psi_checksum;
 
-    printf("[*] Preparing proven BootCore Dumper (%zu bytes, XOR-8 0x%02X)...\n",
-           dumper_size, chk8);
+    printf("[*] Preparing Stock PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
 
     uint8_t boot_hdr[3];
     boot_hdr[0] = 0x30;
-    boot_hdr[1] = (uint8_t)(dumper_size & 0xFF);
-    boot_hdr[2] = (uint8_t)((dumper_size >> 8) & 0xFF);
+    boot_hdr[1] = (uint8_t)(psi_size & 0xFF);
+    boot_hdr[2] = (uint8_t)((psi_size >> 8) & 0xFF);
 
     if (transport_write(s->transport, boot_hdr, 3) != 3) {
         fprintf(stderr, "[-] Failed to write Boot ROM 0x30 header\n");
         return -1;
     }
 
-    printf("[*] Streaming %zu bytes of BootCore dumper to SRAM at 0x00080000...\n", dumper_size);
-    if (transport_write(s->transport, dumper_data, dumper_size) != (int)dumper_size) {
-        fprintf(stderr, "[-] Failed to stream BootCore dumper binary\n");
+    printf("[*] Streaming %zu bytes of Stock PSI to SRAM at 0x00080000...\n", psi_size);
+    if (transport_write(s->transport, psi_data, psi_size) != (int)psi_size) {
+        fprintf(stderr, "[-] Failed to stream PSI binary\n");
         return -1;
     }
 
-    printf("[*] Sending XOR-8 checksum: 0x%02X\n", chk8);
-    if (transport_write(s->transport, &chk8, 1) != 1) {
-        fprintf(stderr, "[-] Failed to send dumper checksum\n");
+    printf("[*] Sending XOR-8 checksum: 0x%02X\n", psi_chk);
+    if (transport_write(s->transport, &psi_chk, 1) != 1) {
+        fprintf(stderr, "[-] Failed to send PSI checksum\n");
         return -1;
     }
 
-    /* Read Boot ROM ACK */
     uint8_t ack_buf[16] = {0};
     int r = transport_read(s->transport, ack_buf, 1, 2000);
-    if (r <= 0) {
-        r = transport_read(s->transport, ack_buf, 1, 2000);
-    }
+    if (r <= 0) r = transport_read(s->transport, ack_buf, 1, 2000);
 
-    if (r > 0 && (ack_buf[0] == 0x01 || ack_buf[0] == 0x0B || ack_buf[0] == 0xB1 || ack_buf[0] == 0xC1)) {
-        printf("[+] Dumper acknowledged by Boot ROM (0x%02X)\n", ack_buf[0]);
-
+    if (r > 0 && ack_buf[0] == 0x01) {
+        printf("[+] PSI acknowledged by Boot ROM (0x01)\n");
         uint8_t ack2[4] = {0};
-        int r2 = transport_read(s->transport, ack2, 1, 500);
-        if (r2 > 0) {
-            printf("[+] Execution handover confirmed by Boot ROM (0x%02X)\n", ack2[0]);
+        int r2 = transport_read(s->transport, ack2, 1, 1000);
+        if (r2 > 0 && ack2[0] == 0x01) {
+            printf("[+] PSI execution handover confirmed by Boot ROM (0x01)\n");
         }
         usleep(50000);
     } else {
@@ -560,142 +549,92 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
         return -1;
     }
 
-    /* 3. Read 32-byte Metadata Header from Dumper on EP 0x83 */
-    printf("[*] Waiting for Boot ROM Dumper header on EP 0x83...\n");
-    uint8_t meta_buf[32] = {0};
-    int meta_read = 0;
-
-    /* Check for vendor readiness token (0x00 0xAA) sent by stock PSI */
-    uint8_t tok[4] = {0};
-    int tn = transport_read(s->transport, tok, 2, 2500);
-    if (tn == 2 && tok[0] == 0x00 && tok[1] == 0xAA) {
-        printf("[+] Received PSI readiness token (0x00 0xAA) on EP 0x83!\n");
-    } else if (tn > 0) {
-        /* Not 0x00 0xAA: already received first bytes of DUMP header */
-        memcpy(meta_buf, tok, tn);
-        meta_read = tn;
+    /* 3. Wait for Stock PSI Readiness Token (0x00 0xAA) on EP 0x83 */
+    printf("[*] Waiting for Stock PSI readiness token on EP 0x83...\n");
+    uint8_t psi_tok[4] = {0};
+    int tn = transport_read(s->transport, psi_tok, 2, 3000);
+    if (tn == 2 && psi_tok[0] == 0x00 && psi_tok[1] == 0xAA) {
+        printf("[+] Stock PSI ready! Received token (0x00 0xAA) - SDRAM & USB active.\n");
+    } else {
+        fprintf(stderr, "[-] Failed waiting for PSI readiness token (got %d bytes: 0x%02X 0x%02X)\n",
+                tn, psi_tok[0], psi_tok[1]);
+        return -1;
     }
 
-    while (meta_read < 32) {
-        int n = transport_read(s->transport, meta_buf + meta_read, 32 - meta_read, 3000);
-        if (n <= 0) {
-            fprintf(stderr, "[-] Timeout or error waiting for dumper metadata header (read %d/32)\n", meta_read);
-            return -1;
+    /* 4. Send RAM Dumper (Stage 2) Size (4 bytes uint32_le) on EP 0x02 */
+    uint32_t dumper_size = (uint32_t)ram_dumper_size;
+    uint8_t sz_buf[4];
+    sz_buf[0] = (uint8_t)(dumper_size & 0xFF);
+    sz_buf[1] = (uint8_t)((dumper_size >> 8) & 0xFF);
+    sz_buf[2] = (uint8_t)((dumper_size >> 16) & 0xFF);
+    sz_buf[3] = (uint8_t)((dumper_size >> 24) & 0xFF);
+
+    printf("[*] Sending RAM Dumper size (%u bytes) to PSI on EP 0x02...\n", dumper_size);
+    if (transport_write(s->transport, sz_buf, 4) != 4) {
+        fprintf(stderr, "[-] Failed to write RAM Dumper size\n");
+        return -1;
+    }
+
+    /* 5. Read Stock PSI ACK (0xCC 0xCC) on EP 0x83 */
+    uint8_t sz_ack[4] = {0};
+    int an = transport_read(s->transport, sz_ack, 2, 2000);
+    if (an == 2 && sz_ack[0] == 0xCC && sz_ack[1] == 0xCC) {
+        printf("[+] Stock PSI acknowledged upload request (0xCC 0xCC)\n");
+    } else {
+        fprintf(stderr, "[-] PSI upload size rejected (got %d bytes: 0x%02X 0x%02X)\n",
+                an, sz_ack[0], sz_ack[1]);
+        return -1;
+    }
+
+    /* 6. Stream RAM Dumper payload + 1-byte checksum in a single transfer to SDRAM at 0x60000000 on EP 0x02 */
+    size_t total_xfer = ram_dumper_size + 1;
+    uint8_t *xfer_buf = (uint8_t *)malloc(total_xfer);
+    if (!xfer_buf) {
+        fprintf(stderr, "[-] Out of memory preparing RAM Dumper transfer\n");
+        return -1;
+    }
+    memcpy(xfer_buf, ram_dumper_binary, ram_dumper_size);
+    xfer_buf[ram_dumper_size] = ram_dumper_checksum;
+
+    printf("[*] Streaming %zu bytes (payload: %zu B, chk: 0x%02X) to SDRAM at 0x60000000...\n",
+           total_xfer, ram_dumper_size, ram_dumper_checksum);
+    if (transport_write(s->transport, xfer_buf, total_xfer) != (int)total_xfer) {
+        fprintf(stderr, "[-] Failed to stream RAM Dumper payload\n");
+        free(xfer_buf);
+        return -1;
+    }
+    free(xfer_buf);
+
+    /* 8. Read PSI Handover ACK on EP 0x83 */
+    uint8_t chk_ack[4] = {0};
+    int cn = transport_read(s->transport, chk_ack, 2, 2000);
+    if (cn >= 1 && (chk_ack[1] == 0xA5 || chk_ack[0] == 0xA5 || chk_ack[0] == 0x01)) {
+        printf("[+] Stock PSI verified RAM Dumper (ACK 0x%02X 0x%02X). Handing over execution to 0x60000400!\n",
+               chk_ack[0], chk_ack[1]);
+    } else {
+        printf("[*] PSI ACK response: %d bytes (0x%02X 0x%02X)\n", cn, chk_ack[0], chk_ack[1]);
+    }
+
+    /* 9. Read RAM Dumper Hello Beacon ("RDMP") on EP 0x83 */
+    printf("[*] Waiting for RAM Dumper agent beacon on EP 0x83...\n");
+    uint8_t hello_buf[16] = {0};
+    int hn = transport_read(s->transport, hello_buf, 16, 3000);
+    if (hn >= 4) {
+        uint32_t magic = *(uint32_t *)(hello_buf + 0);
+        if (magic == 0x504D4452) { /* "RDMP" */
+            uint32_t ver = *(uint32_t *)(hello_buf + 4);
+            uint32_t chip = *(uint32_t *)(hello_buf + 8);
+            printf("[+] Connected to RAM Dumper Agent! Magic: 'RDMP', Version: %u, ChipID: 0x%04X\n", ver, chip);
+            return 0;
         }
-        meta_read += n;
     }
 
-    uint32_t magic = *(uint32_t *)(meta_buf + 0);
-    uint32_t version = *(uint32_t *)(meta_buf + 4);
-    uint32_t bootrom_lr = *(uint32_t *)(meta_buf + 8);
-    uint32_t bootrom_sp = *(uint32_t *)(meta_buf + 12);
-    uint32_t bootrom_cpsr = *(uint32_t *)(meta_buf + 16);
-    uint32_t bootrom_r0 = *(uint32_t *)(meta_buf + 20);
-    uint32_t bootrom_r1 = *(uint32_t *)(meta_buf + 24);
-    uint32_t rom_size = *(uint32_t *)(meta_buf + 28);
-
-    if (magic != 0x44554D50) {
-        fprintf(stderr, "[-] Invalid dumper magic: 0x%08X (expected 0x44554D50 'DUMP')\n", magic);
-        return -1;
-    }
-
-    printf("\n[+] Boot ROM Dumper Agent Connected!\n");
-    printf("    ==================================================\n");
-    printf("    Protocol Version:      v%u\n", version);
-    printf("    Boot ROM Caller (lr):  0x%08X\n", bootrom_lr);
-    printf("    Boot ROM Stack (sp):   0x%08X\n", bootrom_sp);
-    printf("    Boot ROM CPSR:         0x%08X\n", bootrom_cpsr);
-    printf("    Boot ROM Arg R0:       0x%08X\n", bootrom_r0);
-    printf("    Boot ROM Arg R1:       0x%08X\n", bootrom_r1);
-    printf("    Reported ROM Size:     %u bytes (0x%08X)\n", rom_size, rom_size);
-    printf("    ==================================================\n\n");
-
-    if (rom_size == 0 || rom_size > 1024 * 1024) {
-        fprintf(stderr, "[-] Invalid ROM size reported: %u\n", rom_size);
-        return -1;
-    }
-
-    /* 4. Stream Boot ROM data */
-    uint8_t *rom_buf = (uint8_t *)malloc(rom_size);
-    if (!rom_buf) {
-        fprintf(stderr, "[-] Out of memory allocating %u bytes for ROM buffer\n", rom_size);
-        return -1;
-    }
-
-    printf("[*] Streaming Boot ROM image...\n");
-    size_t total_recv = 0;
-    while (total_recv < rom_size) {
-        size_t want = rom_size - total_recv;
-        if (want > 4096) want = 4096;
-        int n = transport_read(s->transport, rom_buf + total_recv, want, 3000);
-        if (n <= 0) {
-            fprintf(stderr, "\n[-] Timeout / disconnect while receiving ROM data (got %zu/%u bytes)\n",
-                    total_recv, rom_size);
-            free(rom_buf);
-            return -1;
-        }
-        total_recv += n;
-        printf("\r[*] Progress: %zu / %u bytes (%u%%)...",
-               total_recv, rom_size, (unsigned)((total_recv * 100) / rom_size));
-        fflush(stdout);
-    }
-    printf("\n[+] ROM transfer complete (%zu bytes)!\n", total_recv);
-
-    /* 5. Validate ARM Vectors at 0x00000000 */
-    uint32_t reset_vec = *(uint32_t *)(rom_buf + 0);
-    printf("[*] Reset Vector at 0x00000000: 0x%08X\n", reset_vec);
-    if ((reset_vec & 0xFF000000) == 0xEA000000) {
-        uint32_t target_branch = (reset_vec & 0x00FFFFFF);
-        uint32_t abs_target = (target_branch << 2) + 8;
-        printf("[+] Valid ARM Branch instruction detected (branches to 0x%08X)\n", abs_target);
-    } else if ((reset_vec & 0xFFFF0000) == 0xE59F0000) {
-        printf("[+] Valid ARM LDR PC instruction detected at 0x00000000\n");
-    }
-
-    /* 6. Save dump to target file */
-    FILE *fout = fopen(out_path, "wb");
-    if (!fout) {
-        fprintf(stderr, "[-] Failed to create output file %s: %s\n", out_path, strerror(errno));
-        free(rom_buf);
-        return -1;
-    }
-    if (fwrite(rom_buf, 1, rom_size, fout) != rom_size) {
-        fprintf(stderr, "[-] Failed to write complete ROM data to %s\n", out_path);
-        fclose(fout);
-        free(rom_buf);
-        return -1;
-    }
-    fclose(fout);
-    free(rom_buf);
-
-    printf("[+] Successfully dumped %u bytes of hardware Boot ROM to: %s\n\n", rom_size, out_path);
-    return 0;
+    fprintf(stderr, "[-] Did not receive valid RDMP beacon from agent (read %d bytes)\n", hn);
+    return -1;
 }
 
-int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
-    if (!s || !out_path) return -1;
-
-    printf("\n================================================================================\n");
-    printf("[*] Starting Safe OpenIFWD NVRAM / Calibration Backup\n");
-    printf("[*] Target Blocks: 4..11 (1 MB / 512 OneNAND pages)\n");
-    printf("[*] Output File:   %s\n", out_path);
-    printf("================================================================================\n");
-
-    /* 1. Sync handshake with Boot ROM */
-    if (flasher_sync(s, 40) != 0) return -1;
-
-    /* 2. Upload Open PSI into SRAM */
-    if (flasher_upload_psi(s, NULL) != 0) return -1;
-
-    /* 3. Connect to agent (reads EP 0x83 token then pings) */
-    if (flasher_connect_agent(s) != 0) return -1;
-
-    openifwd_hw_info_t hw;
-    if (flasher_open_get_hw_info(s, &hw) == 0) {
-        printf("[+] Hardware Info: ChipID=0x%02X, CPU=%u MHz, SDRAM=%u MB, Flash=%u MB\n",
-               hw.chip_id, hw.cpu_freq_hz / 1000000, hw.sdram_size / (1024*1024),
-               (hw.total_blocks * hw.block_size) / (1024*1024));
-    }
+int flasher_dump_memory(flasher_session_t *s, uint32_t addr, uint32_t len, const char *out_path) {
+    if (!s || !out_path || len == 0) return -1;
 
     FILE *fout = fopen(out_path, "wb");
     if (!fout) {
@@ -703,35 +642,97 @@ int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
         return -1;
     }
 
-    const uint32_t start_block = 4;
-    const uint32_t end_block = 11;
-    const uint16_t pages_per_block = 64;
-    size_t total_pages = (end_block - start_block + 1) * pages_per_block;
-    size_t dumped_pages = 0;
-    uint8_t page_buf[2048];
+    printf("\n================================================================================\n");
+    printf("[*] Starting Hardware Memory Extraction via Standalone RAM Dumper\n");
+    printf("[*] Target Range: 0x%08X - 0x%08X (%u KB / %u bytes)\n",
+           addr, addr + len, (len + 1023) / 1024, len);
+    printf("[*] Output File:  %s\n", out_path);
+    printf("================================================================================\n");
 
-    for (uint32_t b = start_block; b <= end_block; b++) {
-        for (uint16_t p = 0; p < pages_per_block; p++) {
-            if (flasher_open_read_page(s, b, p, page_buf, NULL) != 0) {
-                fprintf(stderr, "\n[-] Read failed at Block %u, Page %u\n", b, p);
+    /* Start RAM Dumper if not already running */
+    if (flasher_start_ram_dumper(s) != 0) {
+        fclose(fout);
+        return -1;
+    }
+
+    const uint32_t chunk_size = 2048; /* 2 KB per chunk */
+    uint32_t offset = 0;
+    uint8_t rx_buf[2048];
+
+    while (offset < len) {
+        uint32_t req_len = len - offset;
+        if (req_len > chunk_size) req_len = chunk_size;
+
+        /* Build 16-byte command: MAGIC_CMD_READ (0x44414552), addr, req_len, checksum */
+        uint32_t cmd_buf[4];
+        cmd_buf[0] = 0x44414552; /* "READ" */
+        cmd_buf[1] = addr + offset;
+        cmd_buf[2] = req_len;
+        cmd_buf[3] = cmd_buf[0] ^ cmd_buf[1] ^ cmd_buf[2];
+
+        if (transport_write(s->transport, cmd_buf, 16) != 16) {
+            fprintf(stderr, "\n[-] Failed to send READ command at 0x%08X\n", addr + offset);
+            fclose(fout);
+            return -1;
+        }
+
+        /* Read req_len bytes from EP 0x83 */
+        uint32_t read_bytes = 0;
+        while (read_bytes < req_len) {
+            int n = transport_read(s->transport, rx_buf + read_bytes, req_len - read_bytes, 4000);
+            if (n <= 0) {
+                fprintf(stderr, "\n[-] Timeout reading data at 0x%08X (got %u / %u bytes)\n",
+                        addr + offset, read_bytes, req_len);
                 fclose(fout);
                 return -1;
             }
-            if (fwrite(page_buf, 1, 2048, fout) != 2048) {
-                fprintf(stderr, "\n[-] Write error to output file\n");
-                fclose(fout);
-                return -1;
+            read_bytes += (uint32_t)n;
+        }
+
+        if (fwrite(rx_buf, 1, req_len, fout) != req_len) {
+            fprintf(stderr, "\n[-] Failed to write chunk to output file\n");
+            fclose(fout);
+            return -1;
+        }
+
+        offset += req_len;
+        int pct = (int)((offset * 100ULL) / len);
+        printf("\r[*] Memory Dump Progress: %3d%% (0x%08X / 0x%08X, %u KB)",
+               pct, addr + offset, addr + len, offset / 1024);
+        fflush(stdout);
+    }
+
+    fclose(fout);
+    printf("\n[+] Successfully dumped %u bytes from 0x%08X to %s!\n\n", len, addr, out_path);
+
+    /* If dumping Boot ROM (0x00000000), validate Reset Vector */
+    if (addr == 0x00000000 && len >= 4) {
+        FILE *vf = fopen(out_path, "rb");
+        if (vf) {
+            uint32_t reset_vec = 0;
+            if (fread(&reset_vec, 1, 4, vf) == 4) {
+                printf("[*] Boot ROM Reset Vector at 0x00000000: 0x%08X\n", reset_vec);
+                if ((reset_vec & 0xFF000000) == 0xEA000000) {
+                    uint32_t target_branch = (reset_vec & 0x00FFFFFF);
+                    uint32_t abs_target = (target_branch << 2) + 8;
+                    printf("[+] Valid ARM Branch instruction detected (branches to 0x%08X)!\n", abs_target);
+                } else if ((reset_vec & 0xFFFF0000) == 0xE59F0000) {
+                    printf("[+] Valid ARM LDR PC instruction detected at 0x00000000!\n");
+                }
             }
-            dumped_pages++;
-            int pct = (int)((dumped_pages * 100) / total_pages);
-            printf("\r[*] NVRAM Backup Progress: %3d%% (%zu / %zu pages, %zu KB)",
-                   pct, dumped_pages, total_pages, (dumped_pages * 2048) / 1024);
-            fflush(stdout);
+            fclose(vf);
         }
     }
-    printf("\n[+] NVRAM calibration backup successfully saved to %s (1,048,576 bytes)!\n", out_path);
-    fclose(fout);
+
     return 0;
+}
+
+int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
+    return flasher_dump_memory(s, 0x00000000, 0x00010000, out_path);
+}
+
+int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
+    return flasher_dump_memory(s, 0x60080000, 0x00100000, out_path);
 }
 
 int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *data, size_t size) {
