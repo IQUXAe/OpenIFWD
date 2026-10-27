@@ -73,6 +73,7 @@ int flasher_open_exec_ram(flasher_session_t *s, uint32_t entry_addr);
 int flasher_open_reboot(flasher_session_t *s);
 
 /* High-Level User Operations */
+int flasher_dump_bootrom(flasher_session_t *s, const char *out_path);
 int flasher_dump_nvram(flasher_session_t *s, const char *out_path);
 int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *data, size_t size);
 int flasher_flash(flasher_session_t *s);

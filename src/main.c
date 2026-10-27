@@ -71,12 +71,13 @@ static void print_usage(const char *prog) {
     printf("  info     <file.fls>               Inspect FLS header, chunks and TOC\n");
     printf("  unpack   <file.fls> [out_dir]     Extract binary chunks from FLS container\n");
     printf("  scan                              Scan for connected phone TTY ports\n");
+    printf("  dump-bootrom -p <port> [-o <file>] Extract 64KB Boot ROM (PMB8815 silicon ROM)\n");
     printf("  dump-nvram -p <port> [-o <file>]  Safely backup 1MB NVRAM/EEPROM (IMEI & RF calibrations)\n");
     printf("  ram-boot   -p <port> --bin <file> [--addr 0x60000000] Load & execute binary directly in SDRAM\n");
     printf("  flash    [options]                Flash Samsung Star 3 (GT-S5222)\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
-    printf("  -o, --out <file>        Output file for dump-nvram (default: s5222_nvram_backup.bin)\n");
+    printf("  -o, --out <file>        Output file for dumps (default: bootrom_pmb8815.bin / s5222_nvram_backup.bin)\n");
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
     printf("  --psi <file.bin/fls>    Custom PSI file (default: built-in Open Rust PSI)\n");
@@ -89,6 +90,7 @@ static void print_usage(const char *prog) {
     printf("  -v, --verbose           Enable verbose logging (hex dumps and USB packet traces)\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
+    printf("  %s dump-bootrom -p usb -o bootrom_pmb8815.bin -v\n", prog);
     printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s ram-boot -p usb --bin my_os.bin --addr 0x60000000\n", prog);
     printf("  %s flash -p usb --bsy S5222_BSY.fls --cds S5222_CDS.fls\n", prog);
@@ -302,6 +304,68 @@ int main(int argc, char **argv) {
 
         flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_flash(session);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "dump-bootrom") == 0) {
+        const char *port = NULL;
+        const char *out_path = "bootrom_pmb8815.bin";
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"out",       required_argument, 0, 'o'},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:o:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'o': out_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        if (!port) {
+            fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
+            return 1;
+        }
+
+        cfg.is_usb = (strcmp(port, "usb") == 0);
+
+        transport_t *trans = NULL;
+        if (cfg.is_usb) {
+            trans = transport_create_usb();
+            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
+                fprintf(stderr, "[-] Failed to open direct USB interface\n");
+                if (trans) transport_destroy(trans);
+                return 1;
+            }
+        } else {
+            trans = transport_create_tty();
+            if (!trans || transport_open(trans, port, 115200) != 0) {
+                fprintf(stderr, "[-] Failed to open port %s\n", port);
+                if (trans) transport_destroy(trans);
+                return 1;
+            }
+        }
+
+        if (cfg.verbose) {
+            transport_set_verbose(trans, true);
+        }
+
+        flasher_session_t *session = flasher_create(trans, &cfg);
+        int res = flasher_dump_bootrom(session, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;
