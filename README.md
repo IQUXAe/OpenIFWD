@@ -123,6 +123,7 @@ This compiles:
 ## Documentation
 
 - [OpenIFWD Protocol Specification (v1.0)](docs/OPENIFWD_PROTOCOL.md): Packet wire format, framing, and command codes.
+- [Samsung GT-S5222 OneNAND Flash Layout (XSR Architecture)](docs/xsr_partition_table.md): Hardware flash partition map reverse-engineered from Block 1022 `XSRPART`.
 
 ---
 
