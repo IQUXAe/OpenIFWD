@@ -145,6 +145,14 @@ static uint8_t *load_custom_psi(const char *psi_path, size_t *out_size, uint8_t 
 
     if (!allocated_psi) {
         FILE *raw_psi_f = fopen(psi_path, "rb");
+        if (!raw_psi_f && psi_path[0] != '/') {
+            char alt_path[1024];
+            snprintf(alt_path, sizeof(alt_path), "../%s", psi_path);
+            raw_psi_f = fopen(alt_path, "rb");
+            if (raw_psi_f) {
+                printf("[*] Note: Resolved relative PSI path to '%s'\n", alt_path);
+            }
+        }
         if (raw_psi_f) {
             fseek(raw_psi_f, 0, SEEK_END);
             long sz = ftell(raw_psi_f);
@@ -159,8 +167,12 @@ static uint8_t *load_custom_psi(const char *psi_path, size_t *out_size, uint8_t 
                         allocated_psi = NULL;
                     }
                 }
+            } else {
+                fprintf(stderr, "[-] Error: PSI file size %ld is invalid (expected 1..65535 bytes)\n", sz);
             }
             fclose(raw_psi_f);
+        } else {
+            fprintf(stderr, "[-] Error: Failed to open raw PSI file '%s': %s\n", psi_path, strerror(errno));
         }
     }
 
@@ -538,22 +550,24 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
     transport_flush(s->transport);
     printf("[+] Device synchronized with Boot ROM!\n");
 
-    /* 2. Upload Stock PSI (Stage 1) */
+    /* 2. Upload PSI (Stage 1) */
     uint8_t *allocated_psi = NULL;
     const uint8_t *psi_data = NULL;
     size_t psi_size = 0;
     uint8_t psi_chk = 0;
 
-    if (s->config.psi_path && strlen(s->config.psi_path) > 0) {
+    if (s->config.psi_path && s->config.psi_path[0]) {
+        printf("[*] Flasher: Using CUSTOM PSI binary: %s\n", s->config.psi_path);
         allocated_psi = load_custom_psi(s->config.psi_path, &psi_size, &psi_chk);
-        if (allocated_psi) {
-            psi_data = allocated_psi;
-            printf("[*] Preparing Custom PSI Stage 1 from %s (%zu bytes, XOR-8 0x%02X)...\n",
-                   s->config.psi_path, psi_size, psi_chk);
+        if (!allocated_psi) {
+            fprintf(stderr, "[-] Flasher ERROR: Failed to load custom PSI binary from: %s\n", s->config.psi_path);
+            return -1;
         }
-    }
-
-    if (!psi_data) {
+        psi_data = allocated_psi;
+        printf("[*] Preparing Custom PSI Stage 1 from %s (%zu bytes, XOR-8 0x%02X)...\n",
+               s->config.psi_path, psi_size, psi_chk);
+    } else {
+        printf("[!] Flasher WARNING: Using DEFAULT embedded PSI!\n");
         psi_data = stock_psi_binary;
         psi_size = stock_psi_size;
         psi_chk = stock_psi_checksum;

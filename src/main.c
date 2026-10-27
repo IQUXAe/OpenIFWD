@@ -519,6 +519,10 @@ int main(int argc, char **argv) {
 
         cfg.is_usb = (strcmp(port, "usb") == 0);
 
+        if (cfg.psi_path) {
+            printf("[*] CLI dump-memory: Configured custom PSI path: %s\n", cfg.psi_path);
+        }
+
         transport_t *trans = NULL;
         if (cfg.is_usb) {
             trans = transport_create_usb();
