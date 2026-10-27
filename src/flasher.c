@@ -564,6 +564,18 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
     printf("[*] Waiting for Boot ROM Dumper header on EP 0x83...\n");
     uint8_t meta_buf[32] = {0};
     int meta_read = 0;
+
+    /* Check for vendor readiness token (0x00 0xAA) sent by stock PSI */
+    uint8_t tok[4] = {0};
+    int tn = transport_read(s->transport, tok, 2, 2500);
+    if (tn == 2 && tok[0] == 0x00 && tok[1] == 0xAA) {
+        printf("[+] Received PSI readiness token (0x00 0xAA) on EP 0x83!\n");
+    } else if (tn > 0) {
+        /* Not 0x00 0xAA: already received first bytes of DUMP header */
+        memcpy(meta_buf, tok, tn);
+        meta_read = tn;
+    }
+
     while (meta_read < 32) {
         int n = transport_read(s->transport, meta_buf + meta_read, 32 - meta_read, 3000);
         if (n <= 0) {
