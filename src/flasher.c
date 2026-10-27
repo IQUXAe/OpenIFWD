@@ -504,16 +504,17 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
     /* 1. Sync handshake with Boot ROM */
     if (flasher_sync(s, 40) != 0) return -1;
 
-    /* Clean leftover FIFO before dumper upload */
-    uint8_t drain[64];
-    while (transport_read(s->transport, drain, sizeof(drain), 50) > 0);
+    /* Clean leftover FIFO before PSI upload matching flasher_upload_psi */
+    usleep(20000);
+    transport_flush(s->transport);
+    printf("[+] Device synchronized successfully!\n");
 
-    /* 2. Upload romdumper binary as PSI */
-    const uint8_t *dumper_data = romdumper_binary;
-    size_t dumper_size = romdumper_size;
-    uint8_t chk8 = romdumper_checksum;
+    /* 2. Upload Open PSI (with embedded Boot ROM Dumper) */
+    const uint8_t *dumper_data = open_psi_binary;
+    size_t dumper_size = open_psi_size;
+    uint8_t chk8 = open_psi_checksum;
 
-    printf("[*] Preparing autonomous Boot ROM Dumper (%zu bytes, XOR-8 0x%02X)...\n",
+    printf("[*] Preparing proven BootCore Dumper (%zu bytes, XOR-8 0x%02X)...\n",
            dumper_size, chk8);
 
     uint8_t boot_hdr[3];
@@ -526,9 +527,9 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
         return -1;
     }
 
-    printf("[*] Streaming %zu bytes of ROM dumper to SRAM at 0x00080000...\n", dumper_size);
+    printf("[*] Streaming %zu bytes of BootCore dumper to SRAM at 0x00080000...\n", dumper_size);
     if (transport_write(s->transport, dumper_data, dumper_size) != (int)dumper_size) {
-        fprintf(stderr, "[-] Failed to stream ROM dumper binary\n");
+        fprintf(stderr, "[-] Failed to stream BootCore dumper binary\n");
         return -1;
     }
 
@@ -553,6 +554,7 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
         if (r2 > 0) {
             printf("[+] Execution handover confirmed by Boot ROM (0x%02X)\n", ack2[0]);
         }
+        usleep(50000);
     } else {
         fprintf(stderr, "[-] Unexpected Boot ROM ACK (%d bytes, 0x%02X)\n", r, ack_buf[0]);
         return -1;
