@@ -390,6 +390,13 @@ int flasher_open_get_hw_info(flasher_session_t *s, openifwd_hw_info_t *out_info)
 }
 
 int flasher_open_erase_block(flasher_session_t *s, uint32_t block) {
+    if (block >= ONENAND_PROTECTED_BLOCK_START) {
+        if (!s || !s->config.force_dangerous_erase) {
+            fprintf(stderr, "[-] ERROR: Block %u is in protected calibration/metadata area (978..1023)!\n", block);
+            fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
+            return -EPERM;
+        }
+    }
     uint8_t payload[4];
     memcpy(payload, &block, sizeof(block));
     return openifwd_send_recv(s, OPENIFWD_CMD_ERASE_BLOCK, payload, sizeof(payload),
@@ -398,6 +405,13 @@ int flasher_open_erase_block(flasher_session_t *s, uint32_t block) {
 
 int flasher_open_write_page(flasher_session_t *s, uint32_t block, uint16_t page, const uint8_t *data, const uint8_t *spare) {
     if (!data) return -1;
+    if (block >= ONENAND_PROTECTED_BLOCK_START) {
+        if (!s || !s->config.force_dangerous_erase) {
+            fprintf(stderr, "[-] ERROR: Block %u is in protected calibration/metadata area (978..1023)!\n", block);
+            fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
+            return -EPERM;
+        }
+    }
     uint8_t payload[8 + 2048 + 64];
     uint16_t flags = spare ? 1 : 0;
     memcpy(payload + 0, &block, sizeof(block));
@@ -844,7 +858,112 @@ int flasher_dump_nand(flasher_session_t *s, uint32_t start_block, uint32_t block
 }
 
 int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
-    return flasher_dump_memory(s, 0x00000000, 0x00010000, out_path, 2048);
+    if (!s || !out_path) return -1;
+
+    FILE *fout = fopen(out_path, "wb");
+    if (!fout) {
+        fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
+        return -1;
+    }
+
+    const uint32_t bootrom_size = 64 * 1024; /* 64 KB */
+    const uint32_t chunk_size = 2048;
+    const uint32_t num_chunks = bootrom_size / chunk_size; /* 32 chunks */
+
+    printf("\n================================================================================\n");
+    printf("[*] Starting Genuine Silicon Boot ROM Extraction via Standalone RAM Dumper\n");
+    printf("[*] Hardware Action: SCU REMAP un-masking (Register 0xE4900028 bit 3 cleared)\n");
+    printf("[*] Target:          Physical Mask ROM 0x00000000 - 0x0000FFFF (64 KB)\n");
+    printf("[*] Output File:     %s\n", out_path);
+    printf("================================================================================\n");
+
+    /* Start RAM Dumper if not already running */
+    if (flasher_start_ram_dumper(s) != 0) {
+        fclose(fout);
+        return -1;
+    }
+
+    uint8_t rx_buf[2048];
+    uint32_t total_done = 0;
+
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    for (uint32_t i = 0; i < num_chunks; i++) {
+        uint32_t offset = i * chunk_size;
+
+        /* Build 16-byte command: MAGIC_CMD_DUMP_BOOTROM (0x42524F4D / "BROM"), offset, length, checksum */
+        uint32_t cmd_buf[4];
+        cmd_buf[0] = MAGIC_CMD_DUMP_BOOTROM;
+        cmd_buf[1] = offset;
+        cmd_buf[2] = chunk_size;
+        cmd_buf[3] = cmd_buf[0] ^ cmd_buf[1] ^ cmd_buf[2];
+
+        if (transport_write(s->transport, cmd_buf, 16) != 16) {
+            fprintf(stderr, "\n[-] Failed to send BROM command at offset 0x%04X\n", offset);
+            fclose(fout);
+            return -1;
+        }
+
+        /* Read 2048 bytes from EP 0x83 */
+        uint32_t read_bytes = 0;
+        while (read_bytes < chunk_size) {
+            int n = transport_read(s->transport, rx_buf + read_bytes, chunk_size - read_bytes, 4000);
+            if (n <= 0) {
+                fprintf(stderr, "\n[-] Timeout reading Boot ROM at offset 0x%04X (got %u / %u bytes)\n",
+                        offset, read_bytes, chunk_size);
+                fclose(fout);
+                return -1;
+            }
+            read_bytes += (uint32_t)n;
+        }
+
+        if (fwrite(rx_buf, 1, chunk_size, fout) != chunk_size) {
+            fprintf(stderr, "\n[-] Failed to write Boot ROM chunk to output file\n");
+            fclose(fout);
+            return -1;
+        }
+
+        total_done += chunk_size;
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+        double speed_kb = (elapsed > 0.05) ? ((total_done / 1024.0) / elapsed) : 0.0;
+        int pct = (int)((total_done * 100ULL) / bootrom_size);
+        printf("\r[*] Boot ROM Dump Progress: %3d%% (0x%04X / 0x%04X, %u KB, %.1f KB/s)   ",
+               pct, offset + chunk_size, bootrom_size, total_done / 1024, speed_kb);
+        fflush(stdout);
+    }
+
+    fclose(fout);
+
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    double total_time = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    double avg_speed = (total_time > 0.05) ? ((bootrom_size / 1024.0) / total_time) : 0.0;
+    printf("\n[+] Successfully dumped %u bytes Silicon Boot ROM to %s (%.2f s, %.1f KB/s)!\n",
+           bootrom_size, out_path, total_time, avg_speed);
+
+    /* Validate Reset Vector */
+    FILE *vf = fopen(out_path, "rb");
+    if (vf) {
+        uint32_t reset_vec = 0;
+        if (fread(&reset_vec, 1, 4, vf) == 4) {
+            printf("[*] Silicon Boot ROM Reset Vector (at 0x00000000): 0x%08X\n", reset_vec);
+            if ((reset_vec & 0xFF000000) == 0xEA000000) {
+                uint32_t target_branch = (reset_vec & 0x00FFFFFF);
+                uint32_t abs_target = (target_branch << 2) + 8;
+                printf("[+] Valid ARM Branch instruction detected (entry point 0x%08X)!\n", abs_target);
+            } else if ((reset_vec & 0xFFFF0000) == 0xE59F0000) {
+                printf("[+] Valid ARM LDR PC instruction detected at 0x00000000!\n");
+            }
+        }
+        fclose(vf);
+    }
+    printf("\n");
+
+    return 0;
 }
 
 int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
@@ -941,6 +1060,10 @@ static int flash_fls_file(flasher_session_t *s, const char *fls_path, const char
         uint32_t blk = start_block + b;
         if (blk >= NVRAM_BLOCK_START && blk <= NVRAM_BLOCK_END) {
             fprintf(stderr, "[!] Attempted to write protected block %u! Skipping.\n", blk);
+            continue;
+        }
+        if (blk >= ONENAND_PROTECTED_BLOCK_START && (!s || !s->config.force_dangerous_erase)) {
+            fprintf(stderr, "[!] Attempted to write protected calibration/metadata block %u! Skipping.\n", blk);
             continue;
         }
 

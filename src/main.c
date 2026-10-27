@@ -95,6 +95,7 @@ static void print_usage(const char *prog) {
     printf("  --skip-csc              Skip CSC/DFFS flash (boot target OS directly)\n");
     printf("  -b, --baud <rate>       Baud rate (default: 921600)\n");
     printf("  --erase-all             Erase whole non-protected flash before writing\n");
+    printf("  --force-dangerous-erase Allow erasing/writing protected calibration & metadata blocks (978..1023)\n");
     printf("  -v, --verbose           Enable verbose logging (hex dumps and USB packet traces)\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
@@ -257,6 +258,7 @@ int main(int argc, char **argv) {
             {"cds",       required_argument, 0, 1004},
             {"dffs",      required_argument, 0, 1005},
             {"erase-all", no_argument,       0, 1006},
+            {"force-dangerous-erase", no_argument, 0, 1008},
             {"skip-csc",  no_argument,       0, 1007},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
@@ -275,6 +277,7 @@ int main(int argc, char **argv) {
                 case 1005: cfg.dffs_path = optarg; break;
                 case 1006: cfg.erase_all = true; break;
                 case 1007: cfg.skip_csc = true; break;
+                case 1008: cfg.force_dangerous_erase = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;

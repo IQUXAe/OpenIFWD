@@ -18,6 +18,7 @@ typedef struct {
     const char *dffs_path;    /* Data Flash File System (.dffs / CSC) */
     uint32_t baudrate;        /* Baudrate for UART / unused for USB */
     bool erase_all;           /* Erase whole non-protected flash before writing */
+    bool force_dangerous_erase; /* Allow erasing/writing protected calibration & metadata blocks (978..1023) */
     bool skip_csc;            /* Skip CSC / DFFS flashing */
     bool is_usb;              /* Direct USB connection (EP 0x02 OUT / EP 0x83 IN) */
     bool verbose;             /* Verbose logging (hex dumps, packet traces) */
@@ -45,6 +46,13 @@ typedef struct {
 #define NVRAM_PROTECT_END            NVRAM_PROTECTED_END
 #define NVRAM_PROTECT_SIZE           NVRAM_PROTECTED_SIZE
 #define IFWD_ERR_NVRAM_PROTECTED     0xEE01
+
+/* OneNAND Hardware Calibration & Metadata Protected Range: Blocks 978..1023 */
+#define ONENAND_PROTECTED_BLOCK_START 978U
+#define ONENAND_TOTAL_BLOCKS         1024U
+
+/* Magic Tokens for RAM Dumper */
+#define MAGIC_CMD_DUMP_BOOTROM       0x42524F4D /* "BROM" */
 
 static inline bool is_flash_range_safe(uint32_t addr, uint32_t length) {
     uint32_t end = addr + length;
