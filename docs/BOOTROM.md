@@ -1,6 +1,6 @@
 # Infineon PMB8815 Boot ROM Reference
 
-Author: openIFWD project
+Author: IQUXAe <iquxae@proton.me>
 Target: Infineon PMB8815 (X-Gold 215 / S-Gold family)
 Core:   ARM926EJ-S (ARMv5TEJ, 32-bit little-endian)
 

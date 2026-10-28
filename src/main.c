@@ -77,18 +77,30 @@ static void print_usage(const char *prog) {
     printf("  dump-memory -p <port> -a <hex> -l <len> -o <file> [-c <chunk>] Read arbitrary memory range\n");
     printf("  dump-mem   -p <port> -a <hex> -l <len> [-o <file>] Alias for dump-memory\n");
     printf("  ram-boot   -p <port> --bin <file> [--addr 0x60000000] Load & execute binary directly in SDRAM\n");
-    printf("  flash    [options]                Flash Samsung Star 3 (GT-S5222)\n\n");
+    printf("  flash    -p <port> [options]      Flash Samsung Star 3 (GT-S5222) firmware\n");
+    printf("  flasher-boot -p <port>            Bootstrap & start Open Flasher agent in SDRAM\n");
+    printf("  flasher-ping -p <port>            Ping Open Flasher agent\n");
+    printf("  flasher-id   -p <port>            Query OneNAND Manufacturer and Device ID\n");
+    printf("  flasher-read -p <port> -b <block> --page <page> -o <file> Read 2048-byte OneNAND page\n");
+    printf("  flasher-erase -p <port> -b <block> [-c <count>] Erase OneNAND block(s)\n");
+    printf("  flasher-write -p <port> -b <block> --page <page> -i <file> Write 2048-byte OneNAND page\n");
+    printf("  flasher-reset -p <port>           Reboot phone via Open Flasher agent\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
-    printf("  -o, --out, --output <file> Output file for dumps (default: bootrom_pmb8815_32k.bin / s5222_nvram_backup.bin)\n");
-    printf("  -b, --block, --start-block <num> Starting block for NAND dump (0..1023)\n");
-    printf("  -c, --count, --block-count <num> Number of blocks to dump (default: 1)\n");
+    printf("  -o, --out, --output <file> Output file for dumps / page read\n");
+    printf("  -i, --in, --input <file> Input file for page write\n");
+    printf("  -b, --block, --start-block <num> Starting block for NAND operations (0..1023)\n");
+    printf("  -c, --count, --block-count <num> Number of blocks to dump / erase (default: 1)\n");
+    printf("  -P, --page <num>        Page index within block (0..63)\n");
     printf("  -a, --addr, --address <hex> Base address for memory dump (e.g. 0xFFFF0000, 0x60080000)\n");
     printf("  -l, --len, --length <len>   Length in bytes for memory dump (hex e.g. 0x10000 or decimal)\n");
     printf("  -c, --chunk, --chunk-size <size> Chunk size in bytes (default: 2048, max: 2048)\n");
+    printf("  --fls <file.fls>        Firmware container (.fls) to flash\n");
+    printf("  --code <file.bin>       Raw binary for CODE partition (Part 3, Block 10..)\n");
+    printf("  --csc <file.bin>        Raw binary for CSC partition (Part 4, Block 332..)\n");
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
-    printf("  --psi <file.bin/fls>    Custom PSI file (default: built-in Open Rust PSI)\n");
+    printf("  --psi <file.fls/bin>    Vendor PSI Stage 1 container (.fls) or raw binary (auto-detected if omitted)\n");
     printf("  --bsy <file.fls>        Baseband system code (_BSY.fls)\n");
     printf("  --cds <file.fls>        Customer Data System (_CDS.fls)\n");
     printf("  --dffs <file.dffs>      Data Flash File System (.dffs)\n");
@@ -99,6 +111,14 @@ static void print_usage(const char *prog) {
     printf("  -v, --verbose           Enable verbose logging (hex dumps and USB packet traces)\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
+    printf("  %s flash -p usb --psi S5222XXMJ1_psi.fls --fls S5222XXMJ1_BSY.fls\n", prog);
+    printf("  %s flash -p usb --fls S5222XXMJ1_OXEMJ1/S5222XXMJ1_BSY.fls\n", prog);
+    printf("  %s flash -p usb --code code.bin --csc csc.bin\n", prog);
+    printf("  %s flasher-boot -p usb\n", prog);
+    printf("  %s flasher-id -p usb\n", prog);
+    printf("  %s flasher-read -p usb -b 0 --page 0 -o block0_page0.bin\n", prog);
+    printf("  %s flasher-erase -p usb -b 10 -c 1\n", prog);
+    printf("  %s flasher-write -p usb -b 10 --page 0 -i custom_payload.bin\n", prog);
     printf("  %s dump-bootrom -p usb -o bootrom_pmb8815_32k.bin -v\n", prog);
     printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 0 -c 1 -o nand_block0_boot.bin -v\n", prog);
@@ -106,8 +126,36 @@ static void print_usage(const char *prog) {
     printf("  %s dump-memory -p usb -a 0xFFFF0000 -l 0x10000 -o bootrom_high.bin -v\n", prog);
     printf("  %s dump-memory -p usb -a 0x60080000 -l 0x100000 -o nvram_backup.bin -v\n", prog);
     printf("  %s ram-boot -p usb --bin my_os.bin --addr 0x60000000\n", prog);
-    printf("  %s flash -p usb --bsy S5222_BSY.fls --cds S5222_CDS.fls\n", prog);
     printf("====================================================================\n");
+}
+
+static flasher_session_t *init_session(const char *port, flasher_config_t *cfg, transport_t **out_trans) {
+    if (!port) {
+        fprintf(stderr, "[-] Error: Device port is required (-p usb or -p /dev/ttyACM0)\n");
+        return NULL;
+    }
+    cfg->is_usb = (strcmp(port, "usb") == 0);
+    transport_t *trans = NULL;
+    if (cfg->is_usb) {
+        trans = transport_create_usb();
+        if (!trans || transport_open(trans, NULL, cfg->baudrate) != 0) {
+            fprintf(stderr, "[-] Failed to open direct USB interface\n");
+            if (trans) transport_destroy(trans);
+            return NULL;
+        }
+    } else {
+        trans = transport_create_tty();
+        if (!trans || transport_open(trans, port, 115200) != 0) {
+            fprintf(stderr, "[-] Failed to open port %s\n", port);
+            if (trans) transport_destroy(trans);
+            return NULL;
+        }
+    }
+    if (cfg->verbose) {
+        transport_set_verbose(trans, true);
+    }
+    *out_trans = trans;
+    return flasher_create(trans, cfg);
 }
 
 int main(int argc, char **argv) {
@@ -254,6 +302,9 @@ int main(int argc, char **argv) {
             {"port",      required_argument, 0, 'p'},
             {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
+            {"fls",       required_argument, 0, 1010},
+            {"code",      required_argument, 0, 1011},
+            {"csc",       required_argument, 0, 1012},
             {"bsy",       required_argument, 0, 1003},
             {"cds",       required_argument, 0, 1004},
             {"dffs",      required_argument, 0, 1005},
@@ -272,6 +323,9 @@ int main(int argc, char **argv) {
                 case 'p': port = optarg; break;
                 case 'b': cfg.baudrate = (uint32_t)atoi(optarg); break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1010: cfg.fls_path = optarg; break;
+                case 1011: cfg.code_path = optarg; break;
+                case 1012: cfg.csc_path = optarg; break;
                 case 1003: cfg.bsy_path = optarg; break;
                 case 1004: cfg.cds_path = optarg; break;
                 case 1005: cfg.dffs_path = optarg; break;
@@ -636,6 +690,338 @@ int main(int argc, char **argv) {
 
         flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_dump_nand(session, start_block, block_count, out_path);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-boot") == 0) {
+        const char *port = NULL;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"psi",       required_argument, 0, 1001},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = flasher_start_open_flasher(session);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-ping") == 0) {
+        const char *port = NULL;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"psi",       required_argument, 0, 1001},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = flasher_ofls_ping(session);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-id") == 0) {
+        const char *port = NULL;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"psi",       required_argument, 0, 1001},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        uint16_t mfr = 0, dev = 0;
+        int res = flasher_ofls_id(session, &mfr, &dev);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-read") == 0) {
+        const char *port = NULL;
+        uint32_t block = 0;
+        uint32_t page = 0;
+        const char *out_path = NULL;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'd'},
+            {"block",     required_argument, 0, 'b'},
+            {"page",      required_argument, 0, 'P'},
+            {"out",       required_argument, 0, 'o'},
+            {"psi",       required_argument, 0, 1001},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "d:b:P:p:o:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'd': port = optarg; break;
+                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'P': page = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'p':
+                    if (optarg[0] >= '0' && optarg[0] <= '9') {
+                        page = (uint32_t)strtoul(optarg, NULL, 0);
+                    } else {
+                        port = optarg;
+                    }
+                    break;
+                case 'o': out_path = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        if (!out_path) {
+            fprintf(stderr, "[-] Error: Output file path is required (-o <file>)\n");
+            return 1;
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        uint8_t page_buf[2048];
+        int res = flasher_ofls_read_page(session, block, page, page_buf, 2048);
+        if (res == 0) {
+            FILE *f = fopen(out_path, "wb");
+            if (f) {
+                fwrite(page_buf, 1, 2048, f);
+                fclose(f);
+                printf("[+] Saved 2048 bytes of Block %u, Page %u to %s\n", block, page, out_path);
+            } else {
+                fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
+                res = 1;
+            }
+        }
+
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-erase") == 0) {
+        const char *port = NULL;
+        uint32_t block = 0;
+        uint32_t count = 1;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"block",     required_argument, 0, 'b'},
+            {"count",     required_argument, 0, 'c'},
+            {"force-dangerous-erase", no_argument, 0, 1002},
+            {"psi",       required_argument, 0, 1001},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:b:c:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'c': count = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 1002: cfg.force_dangerous_erase = true; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = flasher_ofls_erase(session, block, count);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-write") == 0) {
+        const char *port = NULL;
+        uint32_t block = 0;
+        uint32_t page = 0;
+        const char *in_path = NULL;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'd'},
+            {"block",     required_argument, 0, 'b'},
+            {"page",      required_argument, 0, 'P'},
+            {"input",     required_argument, 0, 'i'},
+            {"in",        required_argument, 0, 'i'},
+            {"force-dangerous-erase", no_argument, 0, 1002},
+            {"psi",       required_argument, 0, 1001},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "d:b:P:p:i:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'd': port = optarg; break;
+                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'P': page = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'p':
+                    if (optarg[0] >= '0' && optarg[0] <= '9') {
+                        page = (uint32_t)strtoul(optarg, NULL, 0);
+                    } else {
+                        port = optarg;
+                    }
+                    break;
+                case 'i': in_path = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 1002: cfg.force_dangerous_erase = true; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        if (!in_path) {
+            fprintf(stderr, "[-] Error: Input file path is required (-i <file>)\n");
+            return 1;
+        }
+
+        FILE *f = fopen(in_path, "rb");
+        if (!f) {
+            fprintf(stderr, "[-] Failed to open input file: %s (%s)\n", in_path, strerror(errno));
+            return 1;
+        }
+        uint8_t page_buf[2048];
+        size_t n = fread(page_buf, 1, 2048, f);
+        fclose(f);
+        if (n < 2048) {
+            memset(page_buf + n, 0xFF, 2048 - n);
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = flasher_ofls_write_page(session, block, page, page_buf, 2048);
+        if (res == 0) {
+            printf("[+] Successfully programmed 2048 bytes to Block %u, Page %u!\n", block, page);
+        }
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-reset") == 0) {
+        const char *port = NULL;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 921600;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = flasher_ofls_reset(session);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;

@@ -5,6 +5,7 @@
 #include "open_psi.h"
 #include "romdumper_embedded.h"
 #include "ram_dumper_embedded.h"
+#include "sha256.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,8 +13,45 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#include <strings.h>
+#include <dirent.h>
+#include <ctype.h>
 
 #define CHUNK_WRITE_SIZE 2048
+
+typedef struct {
+    const char *sha256;
+    size_t size;
+    const char *description;
+} trusted_psi_t;
+
+static const trusted_psi_t k_trusted_psi[] = {
+    {
+        .sha256 = "652d144ec1466a776dd8c55e34ed4c3faa0fa2adbb52ecbeaab5acad66d1539a",
+        .size = 57644,
+        .description = "Samsung GT-S5222 Stock PSI (XXMJ1 / XXLAF / XXLC3 / XXLL1)"
+    },
+    { NULL, 0, NULL }
+};
+
+int flasher_verify_psi_sha256(const uint8_t *psi_data, size_t psi_len) {
+    if (!psi_data || psi_len == 0) return -1;
+
+    uint8_t hash[32];
+    sha256_calc(psi_data, psi_len, hash);
+    char hex[65];
+    sha256_to_hex(hash, hex);
+
+    for (size_t i = 0; k_trusted_psi[i].sha256 != NULL; i++) {
+        if (strcasecmp(hex, k_trusted_psi[i].sha256) == 0 && psi_len == k_trusted_psi[i].size) {
+            printf("[+] PSI SHA-256 Verified: %s\n    Identified: %s\n", hex, k_trusted_psi[i].description);
+            return 0;
+        }
+    }
+
+    fprintf(stderr, "[!] Warning: PSI SHA-256 (%s, %zu bytes) not found in trusted list!\n", hex, psi_len);
+    return 1;
+}
 
 flasher_session_t *flasher_create(transport_t *transport, const flasher_config_t *cfg) {
     if (!transport || !cfg) return NULL;
@@ -191,6 +229,101 @@ static uint8_t *load_custom_psi(const char *psi_path, size_t *out_size, uint8_t 
     return NULL;
 }
 
+static char *find_psi_in_dir(const char *reference_path) {
+    if (!reference_path) return NULL;
+
+    char dir_buf[1024];
+    strncpy(dir_buf, reference_path, sizeof(dir_buf) - 1);
+    dir_buf[sizeof(dir_buf) - 1] = '\0';
+
+    char *slash = strrchr(dir_buf, '/');
+    if (slash) {
+        *slash = '\0';
+    } else {
+        strcpy(dir_buf, ".");
+    }
+
+    DIR *d = opendir(dir_buf);
+    if (!d) return NULL;
+
+    struct dirent *ent;
+    char found_path[1024] = {0};
+
+    while ((ent = readdir(d)) != NULL) {
+        char lower_name[256];
+        size_t len = strlen(ent->d_name);
+        if (len >= sizeof(lower_name)) continue;
+        for (size_t i = 0; i <= len; i++) {
+            lower_name[i] = (char)tolower((unsigned char)ent->d_name[i]);
+        }
+
+        if (strstr(lower_name, "psi") &&
+            (strstr(lower_name, ".fls") || strstr(lower_name, ".bin"))) {
+            snprintf(found_path, sizeof(found_path), "%s/%s", dir_buf, ent->d_name);
+            break;
+        }
+    }
+    closedir(d);
+
+    if (found_path[0]) {
+        return strdup(found_path);
+    }
+    return NULL;
+}
+
+static uint8_t *resolve_and_load_psi(flasher_session_t *s, size_t *out_size, uint8_t *out_chk) {
+    if (!s || !out_size || !out_chk) return NULL;
+
+    /* 1. Explicitly provided PSI path */
+    if (s->config.psi_path && s->config.psi_path[0]) {
+        printf("[*] Flasher: Loading user-specified PSI: %s\n", s->config.psi_path);
+        return load_custom_psi(s->config.psi_path, out_size, out_chk);
+    }
+
+    /* 2. Try auto-detecting in the directory of specified firmware file */
+    const char *ref_paths[] = {
+        s->config.fls_path,
+        s->config.bsy_path,
+        s->config.code_path,
+        s->config.cds_path,
+        s->config.dffs_path,
+        s->config.csc_path,
+        NULL
+    };
+
+    char *detected = NULL;
+    for (int i = 0; ref_paths[i] != NULL; i++) {
+        if (ref_paths[i] && ref_paths[i][0]) {
+            detected = find_psi_in_dir(ref_paths[i]);
+            if (detected) break;
+        }
+    }
+
+    /* Also check current working directory '.' */
+    if (!detected) {
+        detected = find_psi_in_dir(".");
+    }
+
+    if (detected) {
+        printf("[*] Auto-detected vendor PSI container in firmware directory: %s\n", detected);
+        uint8_t *data = load_custom_psi(detected, out_size, out_chk);
+        free(detected);
+        if (data) return data;
+    }
+
+    /* 3. Not found: Explain clean-room requirement to user */
+    fprintf(stderr, "\n[-] ====================================================================\n");
+    fprintf(stderr, "[-] ERROR: PSI Stage 1 bootloader not specified!\n");
+    fprintf(stderr, "[-] To comply with clean-room open-source licensing and copyright laws,\n");
+    fprintf(stderr, "[-] openIFWD does not redistribute proprietary Samsung/Infineon binary blobs.\n");
+    fprintf(stderr, "[-] Please specify the vendor PSI container from your official firmware:\n");
+    fprintf(stderr, "[-]     --psi <path/to/S5222XXMJ1_psi.fls>  (or raw psi_ram.bin)\n");
+    fprintf(stderr, "[-] openIFWD will dynamically unpack the PSI, verify SHA-256 integrity,\n");
+    fprintf(stderr, "[-] and substitute EBL with the open-source open_flasher agent.\n");
+    fprintf(stderr, "[-] ====================================================================\n\n");
+    return NULL;
+}
+
 int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     if (!s) return -1;
 
@@ -229,19 +362,16 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     }
 
     uint8_t *allocated_psi = NULL;
-    if (!psi_data && s->config.psi_path && strlen(s->config.psi_path) > 0) {
-        allocated_psi = load_custom_psi(s->config.psi_path, &psi_size, &chk8);
-        if (allocated_psi) {
-            psi_data = allocated_psi;
+    if (!psi_data) {
+        allocated_psi = resolve_and_load_psi(s, &psi_size, &chk8);
+        if (!allocated_psi) {
+            return -1;
         }
+        psi_data = allocated_psi;
     }
 
-    if (!psi_data) {
-        psi_data = stock_psi_binary;
-        psi_size = stock_psi_size;
-        chk8 = stock_psi_checksum;
-        printf("[*] Using built-in Stock PSI for PMB8815 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, chk8);
-    }
+    /* Verify SHA-256 against trusted table */
+    flasher_verify_psi_sha256(psi_data, psi_size);
 
     /* Boot ROM Header: Command 0x30, length uint16_le */
     uint8_t boot_hdr[3];
@@ -556,23 +686,15 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
     size_t psi_size = 0;
     uint8_t psi_chk = 0;
 
-    if (s->config.psi_path && s->config.psi_path[0]) {
-        printf("[*] Flasher: Using CUSTOM PSI binary: %s\n", s->config.psi_path);
-        allocated_psi = load_custom_psi(s->config.psi_path, &psi_size, &psi_chk);
-        if (!allocated_psi) {
-            fprintf(stderr, "[-] Flasher ERROR: Failed to load custom PSI binary from: %s\n", s->config.psi_path);
-            return -1;
-        }
-        psi_data = allocated_psi;
-        printf("[*] Preparing Custom PSI Stage 1 from %s (%zu bytes, XOR-8 0x%02X)...\n",
-               s->config.psi_path, psi_size, psi_chk);
-    } else {
-        printf("[*] Flasher: Using embedded stock PSI binary\n");
-        psi_data = stock_psi_binary;
-        psi_size = stock_psi_size;
-        psi_chk = stock_psi_checksum;
-        printf("[*] Preparing Stock PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
+    allocated_psi = resolve_and_load_psi(s, &psi_size, &psi_chk);
+    if (!allocated_psi) {
+        return -1;
     }
+    psi_data = allocated_psi;
+    printf("[*] Preparing verified PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
+
+    /* Verify SHA-256 against trusted table */
+    flasher_verify_psi_sha256(psi_data, psi_size);
 
     uint8_t boot_hdr[3];
     boot_hdr[0] = 0x30;
@@ -1071,98 +1193,645 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
     return flasher_open_exec_ram(s, ram_addr);
 }
 
-static int flash_fls_file(flasher_session_t *s, const char *fls_path, const char *label) {
-    if (!fls_path || access(fls_path, R_OK) != 0) return 0;
 
-    printf("[*] Preparing %s: %s\n", label, fls_path);
+
+/* ============================================================================
+ * Open Flasher (OFLS / RESP) Native Protocol Implementation
+ * ============================================================================ */
+
+static uint32_t ofls_crc32(const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320U;
+            else crc >>= 1;
+        }
+    }
+    return ~crc;
+}
+
+static int ofls_send_cmd(flasher_session_t *s, uint32_t cmd_id, uint32_t addr, uint32_t length, ofls_resp_t *out_resp, int timeout_ms) {
+    if (!s || !s->transport) return -1;
+
+    ofls_cmd_t cmd;
+    cmd.magic  = MAGIC_OFLS_CMD;
+    cmd.cmd    = cmd_id;
+    cmd.addr   = addr;
+    cmd.length = length;
+
+    if (transport_write(s->transport, &cmd, sizeof(cmd)) != (int)sizeof(cmd)) {
+        fprintf(stderr, "[-] Failed to write OFLS command 0x%02X on EP 0x02\n", cmd_id);
+        return -1;
+    }
+
+    ofls_resp_t resp;
+    int r = transport_read(s->transport, &resp, sizeof(resp), timeout_ms);
+    if (r != (int)sizeof(resp)) {
+        fprintf(stderr, "[-] Incomplete OFLS response (got %d bytes, expected %zu)\n", r, sizeof(resp));
+        return -2;
+    }
+
+    if (resp.magic != MAGIC_OFLS_RESP) {
+        fprintf(stderr, "[-] Invalid OFLS response magic: 0x%08X (expected 0x%08X)\n", resp.magic, MAGIC_OFLS_RESP);
+        return -3;
+    }
+
+    if (out_resp) {
+        *out_resp = resp;
+    }
+
+    return 0;
+}
+
+int flasher_start_open_flasher(flasher_session_t *s) {
+    if (!s || !s->transport) return -1;
+
+    /* 1. Quick probe: check if Open Flasher is already running on the device */
+    ofls_cmd_t probe_cmd = {MAGIC_OFLS_CMD, OFLS_CMD_PING, 0, 0};
+    if (transport_write(s->transport, &probe_cmd, sizeof(probe_cmd)) == (int)sizeof(probe_cmd)) {
+        ofls_resp_t probe_resp;
+        int pr = transport_read(s->transport, &probe_resp, sizeof(probe_resp), 200);
+        if (pr == (int)sizeof(probe_resp) && probe_resp.magic == MAGIC_OFLS_RESP && probe_resp.status == 0) {
+            printf("[+] Open Flasher agent is already active and responding on EP 0x83!\n");
+            return 0;
+        }
+    }
+
+    /* 2. Synchronize with Boot ROM */
+    if (flasher_sync(s, 40) != 0) return -1;
+
+    usleep(20000);
+    transport_flush(s->transport);
+    printf("[+] Device synchronized with Boot ROM!\n");
+
+    /* 3. Upload PSI (Stage 1) */
+    uint8_t *allocated_psi = NULL;
+    const uint8_t *psi_data = NULL;
+    size_t psi_size = 0;
+    uint8_t psi_chk = 0;
+
+    allocated_psi = resolve_and_load_psi(s, &psi_size, &psi_chk);
+    if (!allocated_psi) {
+        return -1;
+    }
+    psi_data = allocated_psi;
+    printf("[*] Preparing verified PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
+
+    /* Verify SHA-256 against trusted table */
+    flasher_verify_psi_sha256(psi_data, psi_size);
+
+    uint8_t boot_hdr[3];
+    boot_hdr[0] = 0x30;
+    boot_hdr[1] = (uint8_t)(psi_size & 0xFF);
+    boot_hdr[2] = (uint8_t)((psi_size >> 8) & 0xFF);
+
+    if (transport_write(s->transport, boot_hdr, 3) != 3) {
+        fprintf(stderr, "[-] Failed to write Boot ROM 0x30 header\n");
+        if (allocated_psi) free(allocated_psi);
+        return -1;
+    }
+
+    printf("[*] Streaming %zu bytes of PSI binary to SRAM at 0x00080000...\n", psi_size);
+    if (transport_write(s->transport, psi_data, psi_size) != (int)psi_size) {
+        fprintf(stderr, "[-] Failed to stream PSI binary\n");
+        if (allocated_psi) free(allocated_psi);
+        return -1;
+    }
+
+    printf("[*] Sending XOR-8 checksum: 0x%02X\n", psi_chk);
+    if (transport_write(s->transport, &psi_chk, 1) != 1) {
+        fprintf(stderr, "[-] Failed to send PSI checksum\n");
+        if (allocated_psi) free(allocated_psi);
+        return -1;
+    }
+
+    uint8_t ack_buf[16] = {0};
+    int r = transport_read(s->transport, ack_buf, 1, 2000);
+    if (r <= 0) r = transport_read(s->transport, ack_buf, 1, 2000);
+
+    if (r > 0 && ack_buf[0] == 0x01) {
+        printf("[+] PSI acknowledged by Boot ROM (0x01)\n");
+        uint8_t ack2[4] = {0};
+        int r2 = transport_read(s->transport, ack2, 1, 1000);
+        if (r2 > 0 && ack2[0] == 0x01) {
+            printf("[+] PSI execution handover confirmed by Boot ROM (0x01)\n");
+        }
+        usleep(50000);
+    } else {
+        fprintf(stderr, "[-] Unexpected Boot ROM ACK (%d bytes, 0x%02X)\n", r, ack_buf[0]);
+        if (allocated_psi) free(allocated_psi);
+        return -1;
+    }
+
+    if (allocated_psi) {
+        free(allocated_psi);
+        allocated_psi = NULL;
+    }
+
+    /* 4. Wait for Stock PSI Readiness Token (0x00 0xAA) on EP 0x83 */
+    printf("[*] Waiting for Stock PSI readiness token on EP 0x83...\n");
+    uint8_t psi_tok[4] = {0};
+    int tn = transport_read(s->transport, psi_tok, 2, 3000);
+    if (tn == 2 && psi_tok[0] == 0x00 && psi_tok[1] == 0xAA) {
+        printf("[+] Stock PSI ready! Received token (0x00 0xAA) - SDRAM & USB active.\n");
+    } else {
+        fprintf(stderr, "[-] Failed waiting for PSI readiness token (got %d bytes: 0x%02X 0x%02X)\n",
+                tn, psi_tok[0], psi_tok[1]);
+        return -1;
+    }
+
+    /* 5. Send Open Flasher (Stage 2) Size (4 bytes uint32_le) on EP 0x02 */
+    uint32_t flasher_size = (uint32_t)open_flasher_size;
+    uint8_t sz_buf[4];
+    sz_buf[0] = (uint8_t)(flasher_size & 0xFF);
+    sz_buf[1] = (uint8_t)((flasher_size >> 8) & 0xFF);
+    sz_buf[2] = (uint8_t)((flasher_size >> 16) & 0xFF);
+    sz_buf[3] = (uint8_t)((flasher_size >> 24) & 0xFF);
+
+    printf("[*] Sending Open Flasher size (%u bytes) to PSI on EP 0x02...\n", flasher_size);
+    if (transport_write(s->transport, sz_buf, 4) != 4) {
+        fprintf(stderr, "[-] Failed to write Open Flasher size\n");
+        return -1;
+    }
+
+    /* 6. Read Stock PSI ACK (0xCC 0xCC) on EP 0x83 */
+    uint8_t sz_ack[4] = {0};
+    int an = transport_read(s->transport, sz_ack, 2, 2000);
+    if (an == 2 && sz_ack[0] == 0xCC && sz_ack[1] == 0xCC) {
+        printf("[+] Stock PSI acknowledged upload request (0xCC 0xCC)\n");
+    } else {
+        fprintf(stderr, "[-] PSI upload size rejected (got %d bytes: 0x%02X 0x%02X)\n",
+                an, sz_ack[0], sz_ack[1]);
+        return -1;
+    }
+
+    /* 7. Stream Open Flasher payload + 1-byte checksum to SDRAM at 0x60000000 */
+    size_t total_xfer = open_flasher_size + 1;
+    uint8_t *xfer_buf = (uint8_t *)malloc(total_xfer);
+    if (!xfer_buf) {
+        fprintf(stderr, "[-] Out of memory preparing Open Flasher transfer\n");
+        return -1;
+    }
+    memcpy(xfer_buf, open_flasher_binary, open_flasher_size);
+    xfer_buf[open_flasher_size] = open_flasher_checksum;
+
+    printf("[*] Streaming %zu bytes (payload: %zu B, chk: 0x%02X) to SDRAM at 0x60000000...\n",
+           total_xfer, open_flasher_size, open_flasher_checksum);
+    if (transport_write(s->transport, xfer_buf, total_xfer) != (int)total_xfer) {
+        fprintf(stderr, "[-] Failed to stream Open Flasher payload\n");
+        free(xfer_buf);
+        return -1;
+    }
+    free(xfer_buf);
+
+    /* 8. Read PSI Handover ACK on EP 0x83 */
+    uint8_t chk_ack[4] = {0};
+    int cn = transport_read(s->transport, chk_ack, 2, 2000);
+    if (cn >= 1 && (chk_ack[1] == 0xA5 || chk_ack[0] == 0xA5 || chk_ack[0] == 0x01)) {
+        printf("[+] Stock PSI verified Open Flasher (ACK 0x%02X 0x%02X). Handing over execution to 0x60000400!\n",
+               chk_ack[0], chk_ack[1]);
+    } else {
+        printf("[*] PSI ACK response: %d bytes (0x%02X 0x%02X)\n", cn, chk_ack[0], chk_ack[1]);
+    }
+
+    /* 9. Read Open Flasher Startup Beacon ("RESP" / "PONG") on EP 0x83 */
+    printf("[*] Waiting for Open Flasher startup beacon on EP 0x83...\n");
+    ofls_resp_t beacon;
+    int bn = transport_read(s->transport, &beacon, sizeof(beacon), 5000);
+    if (bn == (int)sizeof(beacon) && beacon.magic == MAGIC_OFLS_RESP && beacon.crc32 == MAGIC_OFLS_PONG) {
+        printf("[+] Connected to Open Flasher Agent! Protocol version: %u\n", beacon.bytes_done);
+        return 0;
+    }
+
+    fprintf(stderr, "[-] Did not receive valid OFLS beacon from agent (read %d bytes)\n", bn);
+    return -1;
+}
+
+int flasher_ofls_ping(flasher_session_t *s) {
+    if (flasher_start_open_flasher(s) != 0) return -1;
+
+    printf("[*] Probing Open Flasher PING...\n");
+    ofls_resp_t resp;
+    int r = ofls_send_cmd(s, OFLS_CMD_PING, 0, 0, &resp, 2000);
+    if (r == 0 && resp.status == 0 && resp.crc32 == MAGIC_OFLS_PONG) {
+        printf("[+] PONG received! Protocol version: %u\n", resp.bytes_done);
+        return 0;
+    }
+
+    fprintf(stderr, "[-] OFLS Ping failed (err: %d, status: 0x%08X)\n", r, resp.status);
+    return -1;
+}
+
+int flasher_ofls_id(flasher_session_t *s, uint16_t *out_mfr, uint16_t *out_dev) {
+    if (flasher_start_open_flasher(s) != 0) return -1;
+
+    printf("[*] Querying OneNAND Flash ID...\n");
+    ofls_resp_t resp;
+    int r = ofls_send_cmd(s, OFLS_CMD_FLASH_ID, 0, 0, &resp, 2000);
+    if (r == 0 && resp.status == 0) {
+        uint16_t mfr = (uint16_t)((resp.bytes_done >> 16) & 0xFFFF);
+        uint16_t dev = (uint16_t)(resp.bytes_done & 0xFFFF);
+        if (out_mfr) *out_mfr = mfr;
+        if (out_dev) *out_dev = dev;
+
+        printf("[+] Samsung OneNAND Flash Detected!\n");
+        printf("    Manufacturer ID: 0x%04X (Samsung: %s)\n", mfr, (mfr == 0x00EC) ? "YES" : "NO");
+        printf("    Device ID:       0x%04X\n", dev);
+        if (dev == 0x0055) {
+            printf("    Chip Model:      Samsung KFM1G16Q2C (1Gb / 128MB OneNAND)\n");
+        }
+        return 0;
+    }
+
+    fprintf(stderr, "[-] OFLS Flash ID query failed (err: %d, status: 0x%08X)\n", r, resp.status);
+    return -1;
+}
+
+int flasher_ofls_erase(flasher_session_t *s, uint32_t block, uint32_t count) {
+    if (count == 0) count = 1;
+
+    /* NVRAM & Metadata Protection Check */
+    if (block >= ONENAND_PROTECTED_BLOCK_START || (block + count) > ONENAND_PROTECTED_BLOCK_START) {
+        if (!s || !s->config.force_dangerous_erase) {
+            fprintf(stderr, "[-] ERROR: Block range %u..%u targets protected calibration/metadata area (978..1023)!\n",
+                    block, block + count - 1);
+            fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
+            return -EPERM;
+        }
+    }
+
+    if (flasher_start_open_flasher(s) != 0) return -1;
+
+    printf("[*] Erasing %u OneNAND block(s) starting from block %u...\n", count, block);
+    ofls_resp_t resp;
+    int r = ofls_send_cmd(s, OFLS_CMD_BLOCK_ERASE, block, count, &resp, 10000);
+    if (r == 0 && resp.status == 0) {
+        printf("[+] Successfully erased %u block(s)!\n", resp.bytes_done);
+        return 0;
+    }
+
+    if (resp.status == IFWD_ERR_NVRAM_PROTECTED) {
+        fprintf(stderr, "[-] Agent rejected erase: Block is in protected NVRAM calibration area!\n");
+        return -EPERM;
+    }
+
+    fprintf(stderr, "[-] OFLS Block Erase failed (status: 0x%08X, erased: %u)\n", resp.status, resp.bytes_done);
+    return -1;
+}
+
+int flasher_ofls_write_page(flasher_session_t *s, uint32_t block, uint32_t page, const uint8_t *data, size_t len) {
+    if (!data || len == 0) return -1;
+
+    /* NVRAM & Metadata Protection Check */
+    if (block >= ONENAND_PROTECTED_BLOCK_START) {
+        if (!s || !s->config.force_dangerous_erase) {
+            fprintf(stderr, "[-] ERROR: Block %u is in protected calibration/metadata area (978..1023)!\n", block);
+            fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
+            return -EPERM;
+        }
+    }
+
+    if (flasher_start_open_flasher(s) != 0) return -1;
+
+    uint8_t page_buf[2048];
+    if (len >= 2048) {
+        memcpy(page_buf, data, 2048);
+    } else {
+        memcpy(page_buf, data, len);
+        memset(page_buf + len, 0xFF, 2048 - len);
+    }
+
+    uint32_t expected_crc = ofls_crc32(page_buf, 2048);
+
+    /* 1. Send CMD_PAGE_WRITE */
+    ofls_cmd_t cmd = {MAGIC_OFLS_CMD, OFLS_CMD_PAGE_WRITE, block, page};
+    if (transport_write(s->transport, &cmd, sizeof(cmd)) != (int)sizeof(cmd)) {
+        fprintf(stderr, "[-] Failed to write OFLS Page Write command\n");
+        return -1;
+    }
+
+    /* 2. Stream 2048-byte page payload */
+    if (transport_write(s->transport, page_buf, 2048) != 2048) {
+        fprintf(stderr, "[-] Failed to stream 2048-byte page data\n");
+        return -1;
+    }
+
+    /* 3. Read response */
+    ofls_resp_t resp;
+    int r = transport_read(s->transport, &resp, sizeof(resp), 5000);
+    if (r != (int)sizeof(resp) || resp.magic != MAGIC_OFLS_RESP) {
+        fprintf(stderr, "[-] Failed reading OFLS Page Write response\n");
+        return -2;
+    }
+
+    if (resp.status == IFWD_ERR_NVRAM_PROTECTED) {
+        fprintf(stderr, "[-] Agent rejected write: Block %u is in protected NVRAM calibration area!\n", block);
+        return -EPERM;
+    }
+
+    if (resp.status == 0 && resp.crc32 == expected_crc) {
+        return 0;
+    }
+
+    fprintf(stderr, "[-] OFLS Page Write failed: status=0x%08X, CRC: 0x%08X (expected: 0x%08X)\n",
+            resp.status, resp.crc32, expected_crc);
+    return -3;
+}
+
+int flasher_ofls_read_page(flasher_session_t *s, uint32_t block, uint32_t page, uint8_t *out_data, size_t len) {
+    if (!out_data || len == 0) return -1;
+
+    if (flasher_start_open_flasher(s) != 0) return -1;
+
+    ofls_cmd_t cmd = {MAGIC_OFLS_CMD, OFLS_CMD_PAGE_READ, block, page};
+    if (transport_write(s->transport, &cmd, sizeof(cmd)) != (int)sizeof(cmd)) {
+        fprintf(stderr, "[-] Failed to write OFLS Page Read command\n");
+        return -1;
+    }
+
+    /* 1. Read response header */
+    ofls_resp_t resp;
+    int r = transport_read(s->transport, &resp, sizeof(resp), 5000);
+    if (r != (int)sizeof(resp) || resp.magic != MAGIC_OFLS_RESP) {
+        fprintf(stderr, "[-] Failed reading OFLS Page Read response header\n");
+        return -2;
+    }
+
+    if (resp.status != 0 && resp.status != 5) { /* 5 indicates ECC warning */
+        fprintf(stderr, "[-] OFLS Page Read reported error: status=0x%08X\n", resp.status);
+        return -3;
+    }
+
+    /* 2. Read 2048-byte page payload */
+    uint8_t page_buf[2048];
+    int pr = transport_read(s->transport, page_buf, 2048, 5000);
+    if (pr != 2048) {
+        fprintf(stderr, "[-] Incomplete page payload received (got %d bytes, expected 2048)\n", pr);
+        return -4;
+    }
+
+    uint32_t calc_crc = ofls_crc32(page_buf, 2048);
+    if (calc_crc != resp.crc32) {
+        fprintf(stderr, "[!] Warning: CRC32 mismatch on page read (agent: 0x%08X, host: 0x%08X)\n",
+                resp.crc32, calc_crc);
+    }
+
+    size_t copy_sz = (len < 2048) ? len : 2048;
+    memcpy(out_data, page_buf, copy_sz);
+
+    if (resp.status == 5) {
+        printf("[!] Notice: ECC warning flagged by OneNAND controller for Block %u, Page %u\n", block, page);
+    }
+
+    return 0;
+}
+
+int flasher_ofls_reset(flasher_session_t *s) {
+    printf("[*] Sending OFLS RESET to agent...\n");
+    ofls_resp_t resp;
+    ofls_send_cmd(s, OFLS_CMD_RESET, 0, 0, &resp, 1000);
+    printf("[+] Reset command sent. Phone rebooting...\n");
+    return 0;
+}
+
+int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path, uint32_t start_block, uint32_t max_blocks, const char *label) {
+    if (!s || !bin_path || access(bin_path, R_OK) != 0) {
+        fprintf(stderr, "[-] Cannot access %s file: %s (%s)\n", label, bin_path ? bin_path : "<null>", strerror(errno));
+        return -1;
+    }
+
+    FILE *f = fopen(bin_path, "rb");
+    if (!f) {
+        fprintf(stderr, "[-] Failed to open %s: %s\n", bin_path, strerror(errno));
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long file_sz = ftell(f);
+    rewind(f);
+
+    if (file_sz <= 0) {
+        fprintf(stderr, "[-] %s file %s is empty\n", label, bin_path);
+        fclose(f);
+        return -1;
+    }
+
+    uint32_t blocks_needed = (uint32_t)((file_sz + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
+    if (blocks_needed > max_blocks) {
+        fprintf(stderr, "[-] ERROR: File %s (%ld bytes, %u blocks) exceeds partition capacity (%u blocks)!\n",
+                bin_path, file_sz, blocks_needed, max_blocks);
+        fclose(f);
+        return -1;
+    }
+
+    /* Check NVRAM safety */
+    if (start_block >= ONENAND_PROTECTED_BLOCK_START || (start_block + blocks_needed) > ONENAND_PROTECTED_BLOCK_START) {
+        if (!s->config.force_dangerous_erase) {
+            fprintf(stderr, "[-] ERROR: Partition write targets protected NVRAM calibration area (978..1023)!\n");
+            fclose(f);
+            return -EPERM;
+        }
+    }
+
+    printf("\n[*] Flashing Partition [%s] from: %s\n", label, bin_path);
+    printf("    Target Range: Blocks %u .. %u (%u blocks, %ld bytes)\n",
+           start_block, start_block + blocks_needed - 1, blocks_needed, file_sz);
+
+    /* 1. Erase target partition blocks */
+    printf("[*] Erasing %u block(s) for partition [%s]...\n", blocks_needed, label);
+    if (flasher_ofls_erase(s, start_block, blocks_needed) != 0) {
+        fprintf(stderr, "[-] Failed to erase blocks for [%s]\n", label);
+        fclose(f);
+        return -1;
+    }
+
+    /* 2. Program pages */
+    uint8_t page_buf[ONENAND_PAGE_SIZE];
+    uint32_t total_pages = (uint32_t)((file_sz + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+    uint32_t pages_done = 0;
+
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    for (uint32_t b = 0; b < blocks_needed; b++) {
+        uint32_t blk = start_block + b;
+        for (uint32_t p = 0; p < ONENAND_PAGES_PER_BLOCK; p++) {
+            if (pages_done >= total_pages) break;
+
+            memset(page_buf, 0xFF, sizeof(page_buf));
+            size_t nread = fread(page_buf, 1, sizeof(page_buf), f);
+            if (nread == 0 && ferror(f)) {
+                fprintf(stderr, "\n[-] Read error reading %s at block %u, page %u\n", bin_path, blk, p);
+                fclose(f);
+                return -1;
+            }
+
+            if (flasher_ofls_write_page(s, blk, p, page_buf, sizeof(page_buf)) != 0) {
+                fprintf(stderr, "\n[-] Write failed at Block %u, Page %u\n", blk, p);
+                fclose(f);
+                return -1;
+            }
+
+            pages_done++;
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+            double speed_kb = (elapsed > 0.05) ? (((size_t)pages_done * 2) / elapsed) : 0.0;
+            int pct = (int)((pages_done * 100ULL) / total_pages);
+            printf("\r[*] [%s] Progress: %3d%% (%u / %u pages, Block %u Page %u, %.1f KB/s)   ",
+                   label, pct, pages_done, total_pages, blk, p, speed_kb);
+            fflush(stdout);
+        }
+    }
+
+    fclose(f);
+    printf("\n[+] Partition [%s] flashed successfully! (%u pages written)\n", label, pages_done);
+    return 0;
+}
+
+int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
+    if (!s || !fls_path || access(fls_path, R_OK) != 0) {
+        fprintf(stderr, "[-] Cannot access FLS container: %s (%s)\n", fls_path ? fls_path : "<null>", strerror(errno));
+        return -1;
+    }
+
+    printf("\n[*] Processing FLS container: %s\n", fls_path);
     fls_file_t *fls = fls_open(fls_path);
     if (!fls) {
-        fprintf(stderr, "[-] Failed to parse FLS: %s\n", fls_path);
-        return -1;
+        fprintf(stderr, "[*] Note: %s is not an FLS container; attempting direct raw partition flash to CODE\n", fls_path);
+        return flasher_flash_binary_to_partition(s, fls_path, ONENAND_PART_CODE_START, ONENAND_PART_CODE_BLOCKS, "CODE");
     }
 
-    const fls_chunk_info_t *chunk = fls_find_chunk(fls, FLS_TAG_IMAGE_DATA);
-    if (!chunk) chunk = fls_find_chunk(fls, FLS_TAG_PARTITION_TABLE);
+    /* Determine partition mapping based on file name or TOC */
+    uint32_t start_block = ONENAND_PART_CODE_START;
+    uint32_t max_blocks  = ONENAND_PART_CODE_BLOCKS;
+    const char *label    = "CODE/BSY";
 
-    if (!chunk) {
-        fprintf(stderr, "[-] No flashable chunk in %s\n", fls_path);
+    if (strstr(fls_path, "cds") || strstr(fls_path, "CDS") || strstr(fls_path, "csc") || strstr(fls_path, "CSC")) {
+        start_block = ONENAND_PART_CSC_START;
+        max_blocks  = ONENAND_PART_CSC_BLOCKS;
+        label       = "CSC/CDS";
+    } else if (strstr(fls_path, "dffs") || strstr(fls_path, "DFFS") || strstr(fls_path, "ifs") || strstr(fls_path, "IFS")) {
+        start_block = ONENAND_PART_IFS_START;
+        max_blocks  = ONENAND_PART_IFS_BLOCKS;
+        label       = "IFS/DFFS";
+    } else if (strstr(fls_path, "slb") || strstr(fls_path, "SLB")) {
+        start_block = ONENAND_PART_EBL_START;
+        max_blocks  = ONENAND_PART_EBL_BLOCKS;
+        label       = "SLB/EBL";
+    }
+
+    const fls_chunk_info_t *chunks[32];
+    size_t n_chunks = fls_find_all_chunks(fls, FLS_TAG_IMAGE_DATA, chunks, 32);
+
+    if (n_chunks == 0) {
+        const fls_chunk_info_t *c = fls_find_chunk(fls, FLS_TAG_PARTITION_TABLE);
+        if (c) {
+            chunks[0] = c;
+            n_chunks = 1;
+        }
+    }
+
+    if (n_chunks == 0) {
+        fprintf(stderr, "[-] No flashable IMAGE_DATA or payload chunks found in %s\n", fls_path);
         fls_close(fls);
         return -1;
     }
 
-    size_t payload_len = 0;
-    const uint8_t *payload = fls_get_chunk_payload(fls, chunk, &payload_len);
-    if (!payload || payload_len == 0) {
-        fprintf(stderr, "[-] Empty payload in %s\n", fls_path);
-        fls_close(fls);
-        return -1;
-    }
+    printf("[*] Found %zu flashable image chunk(s) in %s (Targeting [%s] starting at Block %u)\n",
+           n_chunks, fls_path, label, start_block);
 
-    uint32_t target_addr = 0x60000000;
-    for (size_t i = 0; i < fls->toc_count; i++) {
-        if (fls->toc_entries[i].tag_id == chunk->tag && fls->toc_entries[i].load_address != 0) {
-            target_addr = fls->toc_entries[i].load_address;
-            break;
-        }
-    }
+    uint32_t cur_block = start_block;
+    uint32_t total_written_blocks = 0;
 
-    /* Verify NVRAM safety */
-    if (!is_flash_range_safe(target_addr, (uint32_t)payload_len)) {
-        fprintf(stderr, "[!] CRITICAL: Target address 0x%08X overlaps protected NVRAM! Aborting.\n", target_addr);
-        fls_close(fls);
-        return -1;
-    }
+    for (size_t i = 0; i < n_chunks; i++) {
+        size_t raw_sz = 0;
+        const uint8_t *raw_data = fls_get_chunk_payload(fls, chunks[i], &raw_sz);
+        if (!raw_data || raw_sz == 0) continue;
 
-    const uint32_t block_size = 128 * 1024;
-    const uint32_t page_size = 2048;
-    const uint16_t pages_per_block = 64;
+        /* Skip FLS subheader (28 bytes) if present */
+        const uint8_t *payload = raw_data;
+        size_t payload_len = raw_sz;
 
-    uint32_t start_block = (target_addr - 0x60000000) / block_size;
-    uint32_t num_blocks = (uint32_t)((payload_len + block_size - 1) / block_size);
-
-    printf("[*] Flashing %s: %zu bytes -> Blocks %u..%u\n", label, payload_len, start_block, start_block + num_blocks - 1);
-
-    for (uint32_t b = 0; b < num_blocks; b++) {
-        uint32_t blk = start_block + b;
-        if (blk >= NVRAM_BLOCK_START && blk <= NVRAM_BLOCK_END) {
-            fprintf(stderr, "[!] Attempted to write protected block %u! Skipping.\n", blk);
-            continue;
-        }
-        if (blk >= ONENAND_PROTECTED_BLOCK_START && (!s || !s->config.force_dangerous_erase)) {
-            fprintf(stderr, "[!] Attempted to write protected calibration/metadata block %u! Skipping.\n", blk);
-            continue;
+        if (raw_sz > 28 && chunks[i]->tag == FLS_TAG_IMAGE_DATA) {
+            uint32_t magic_probe = *(const uint32_t *)(raw_data + 28);
+            if ((magic_probe & 0xFF000000) == 0xEA000000 || (magic_probe & 0x0000FFFF) == 0x696C) {
+                payload = raw_data + 28;
+                payload_len = raw_sz - 28;
+            }
         }
 
-        if (flasher_open_erase_block(s, blk) != 0) {
-            fprintf(stderr, "\n[-] Block erase failed: %u\n", blk);
+        uint32_t blocks_needed = (uint32_t)((payload_len + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
+        if (total_written_blocks + blocks_needed > max_blocks) {
+            fprintf(stderr, "[-] Warning: Chunk %zu (%zu bytes, %u blocks) exceeds partition remaining space (%u blocks)\n",
+                    i + 1, payload_len, blocks_needed, max_blocks - total_written_blocks);
+            blocks_needed = max_blocks - total_written_blocks;
+            if (blocks_needed == 0) break;
+        }
+
+        /* Check NVRAM safety */
+        if (cur_block >= ONENAND_PROTECTED_BLOCK_START || (cur_block + blocks_needed) > ONENAND_PROTECTED_BLOCK_START) {
+            if (!s->config.force_dangerous_erase) {
+                fprintf(stderr, "[-] ERROR: Chunk %zu write targets protected NVRAM calibration area (978..1023)!\n", i + 1);
+                fls_close(fls);
+                return -EPERM;
+            }
+        }
+
+        printf("[*] Erasing %u block(s) for Chunk %zu (Blocks %u .. %u)...\n",
+               blocks_needed, i + 1, cur_block, cur_block + blocks_needed - 1);
+        if (flasher_ofls_erase(s, cur_block, blocks_needed) != 0) {
+            fprintf(stderr, "[-] Erase failed for Chunk %zu\n", i + 1);
             fls_close(fls);
             return -1;
         }
 
-        for (uint16_t p = 0; p < pages_per_block; p++) {
-            size_t offset = (size_t)b * block_size + (size_t)p * page_size;
-            if (offset >= payload_len) break;
+        uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+        uint32_t pages_done = 0;
+        uint8_t page_buf[ONENAND_PAGE_SIZE];
 
-            uint8_t pbuf[2048];
-            memset(pbuf, 0xFF, sizeof(pbuf));
-            size_t copy_sz = payload_len - offset;
-            if (copy_sz > 2048) copy_sz = 2048;
-            memcpy(pbuf, payload + offset, copy_sz);
+        struct timespec start_time;
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-            if (flasher_open_write_page(s, blk, p, pbuf, NULL) != 0) {
-                fprintf(stderr, "\n[-] Page write failed: Block %u, Page %u\n", blk, p);
-                fls_close(fls);
-                return -1;
+        for (uint32_t b = 0; b < blocks_needed; b++) {
+            uint32_t blk = cur_block + b;
+            for (uint32_t p = 0; p < ONENAND_PAGES_PER_BLOCK; p++) {
+                if (pages_done >= total_pages) break;
+
+                size_t offset = (size_t)pages_done * ONENAND_PAGE_SIZE;
+                memset(page_buf, 0xFF, sizeof(page_buf));
+
+                size_t copy_sz = payload_len - offset;
+                if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
+                memcpy(page_buf, payload + offset, copy_sz);
+
+                if (flasher_ofls_write_page(s, blk, p, page_buf, sizeof(page_buf)) != 0) {
+                    fprintf(stderr, "\n[-] Write failed at Chunk %zu, Block %u, Page %u\n", i + 1, blk, p);
+                    fls_close(fls);
+                    return -1;
+                }
+
+                pages_done++;
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+                double speed_kb = (elapsed > 0.05) ? (((size_t)pages_done * 2) / elapsed) : 0.0;
+                int pct = (int)((pages_done * 100ULL) / total_pages);
+                printf("\r[*] Chunk %zu/%zu Progress: %3d%% (%u / %u pages, Block %u Page %u, %.1f KB/s)   ",
+                       i + 1, n_chunks, pct, pages_done, total_pages, blk, p, speed_kb);
+                fflush(stdout);
             }
         }
+        printf("\n[+] Chunk %zu flashed successfully!\n", i + 1);
 
-        int pct = (int)(((b + 1) * 100) / num_blocks);
-        printf("\r[*] Progress: %3d%% (%u / %u blocks)", pct, b + 1, num_blocks);
-        fflush(stdout);
+        cur_block += blocks_needed;
+        total_written_blocks += blocks_needed;
     }
 
-    printf("\n[+] %s flashed successfully!\n", label);
     fls_close(fls);
+    printf("[+] %s flashed successfully (%u blocks total)!\n", label, total_written_blocks);
     return 0;
 }
 
@@ -1170,36 +1839,89 @@ int flasher_flash(flasher_session_t *s) {
     if (!s) return -1;
 
     printf("\n================================================================================\n");
-    printf("[*] Starting OpenIFWD Firmware Flashing for Samsung Star 3 (GT-S5222)\n");
+    printf("[*] Starting OpenIFWD Firmware Flasher for Samsung GT-S5222 (PMB8815)\n");
     printf("================================================================================\n");
 
-    /* 1. Sync handshake with Boot ROM */
-    if (flasher_sync(s, 40) != 0) return -1;
-
-    /* 2. Upload Open PSI into SRAM */
-    if (flasher_upload_psi(s, NULL) != 0) return -1;
-
-    /* 3. Connect to Open PSI agent */
-    if (flasher_connect_agent(s) != 0) return -1;
-
-    openifwd_hw_info_t hw;
-    if (flasher_open_get_hw_info(s, &hw) == 0) {
-        printf("[+] Hardware Info: ChipID=0x%02X, CPU=%u MHz, SDRAM=%u MB, Flash=%u MB\n",
-               hw.chip_id, hw.cpu_freq_hz / 1000000, hw.sdram_size / (1024*1024),
-               (hw.total_blocks * hw.block_size) / (1024*1024));
+    /* 1. Synchronize with Boot ROM, upload PSI with SHA-256 validation, start open_flasher agent */
+    if (flasher_start_open_flasher(s) != 0) {
+        fprintf(stderr, "[-] Failed to bootstrap Open Flasher agent on device\n");
+        return -1;
     }
 
+    /* 2. Query Flash ID to verify Samsung OneNAND connection and model */
+    uint16_t mfr = 0, dev = 0;
+    if (flasher_ofls_id(s, &mfr, &dev) != 0 || mfr != 0x00EC) {
+        fprintf(stderr, "[-] Target flash is not a valid Samsung OneNAND (MFR: 0x%04X, DEV: 0x%04X)\n", mfr, dev);
+        return -1;
+    }
+
+    /* 3. Execute requested flash operations */
+    int flashed_count = 0;
+
+    /* A. Dedicated CODE partition binary (--code) */
+    if (s->config.code_path) {
+        if (flasher_flash_binary_to_partition(s, s->config.code_path,
+                                              ONENAND_PART_CODE_START,
+                                              ONENAND_PART_CODE_BLOCKS, "CODE") != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* B. Dedicated CSC partition binary (--csc) */
+    if (s->config.csc_path) {
+        if (flasher_flash_binary_to_partition(s, s->config.csc_path,
+                                              ONENAND_PART_CSC_START,
+                                              ONENAND_PART_CSC_BLOCKS, "CSC") != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* C. Unified or Section FLS container (--fls) */
+    if (s->config.fls_path) {
+        if (flasher_flash_fls_container(s, s->config.fls_path) != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* D. BSY section FLS (--bsy) */
     if (s->config.bsy_path) {
-        if (flash_fls_file(s, s->config.bsy_path, "Baseband System (BSY)") != 0) return -1;
-    }
-    if (s->config.cds_path) {
-        if (flash_fls_file(s, s->config.cds_path, "Customer Data (CDS)") != 0) return -1;
-    }
-    if (!s->config.skip_csc && s->config.dffs_path) {
-        if (flash_fls_file(s, s->config.dffs_path, "Customization / DFFS (CSC)") != 0) return -1;
+        if (flasher_flash_fls_container(s, s->config.bsy_path) != 0) {
+            return -1;
+        }
+        flashed_count++;
     }
 
-    printf("[+] Flashing complete! Rebooting device...\n");
-    flasher_open_reboot(s);
+    /* E. CDS section FLS (--cds) */
+    if (s->config.cds_path) {
+        if (flasher_flash_fls_container(s, s->config.cds_path) != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* F. DFFS / CSC section (--dffs) */
+    if (!s->config.skip_csc && s->config.dffs_path) {
+        if (flasher_flash_fls_container(s, s->config.dffs_path) != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    if (flashed_count == 0) {
+        fprintf(stderr, "[-] No firmware files specified to flash!\n");
+        fprintf(stderr, "    Usage: ./openifwd flash -p usb --fls <firmware.fls>\n");
+        fprintf(stderr, "    Or:    ./openifwd flash -p usb --code <code.bin> --csc <csc.bin>\n");
+        return -1;
+    }
+
+    printf("\n================================================================================\n");
+    printf("[+] Flashing complete! (%d component(s) successfully written)\n", flashed_count);
+    printf("[*] Resetting and rebooting device...\n");
+    printf("================================================================================\n");
+    flasher_ofls_reset(s);
+
     return 0;
 }

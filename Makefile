@@ -5,7 +5,7 @@ LDFLAGS ?= $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-lusb-1.0")
 GTK_CFLAGS = $(shell pkg-config --cflags gtk+-3.0 pixman-1 2>/dev/null)
 GTK_LDFLAGS = -rdynamic $(shell pkg-config --libs gtk+-3.0 pixman-1 2>/dev/null || echo "-lpixman-1") -lpthread
 
-SRC = src/fls.c src/protocol.c src/transport_tty.c src/transport_usb.c src/flasher.c src/open_psi_embedded.c src/romdumper_embedded.c src/ram_dumper_embedded.c
+SRC = src/fls.c src/protocol.c src/transport_tty.c src/transport_usb.c src/flasher.c src/sha256.c src/open_psi_embedded.c src/romdumper_embedded.c src/ram_dumper_embedded.c src/open_flasher_embedded.c
 OBJS = $(SRC:.c=.o)
 
 MAIN_SRC = src/main.c
