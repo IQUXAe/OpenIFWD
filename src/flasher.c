@@ -567,7 +567,7 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
         printf("[*] Preparing Custom PSI Stage 1 from %s (%zu bytes, XOR-8 0x%02X)...\n",
                s->config.psi_path, psi_size, psi_chk);
     } else {
-        printf("[!] Flasher WARNING: Using DEFAULT embedded PSI!\n");
+        printf("[*] Flasher: Using embedded stock PSI binary\n");
         psi_data = stock_psi_binary;
         psi_size = stock_psi_size;
         psi_chk = stock_psi_checksum;
@@ -931,7 +931,7 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
 
     printf("\n================================================================================\n");
     printf("[*] Starting Genuine Silicon Boot ROM Extraction via Standalone RAM Dumper\n");
-    printf("[*] Hardware Action: SCU REMAP un-masking (Register 0xE4900028 bit 3 cleared)\n");
+    printf("[*] Hardware Action: SCU REMAP un-masking (Register 0xE4900088 cleared)\n");
     printf("[*] Target:          Physical Mask ROM 0x00000000 - 0x0000FFFF (64 KB)\n");
     printf("[*] Output File:     %s\n", out_path);
     printf("================================================================================\n");
