@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 #include <dirent.h>
 
 #include "fls.h"
@@ -711,7 +712,111 @@ static void on_check_builtin_psi_toggled(GtkToggleButton *tb, gpointer user_data
     }
 }
 
+static void ensure_root_privileges(int argc, char **argv) {
+    if (geteuid() == 0) {
+        return; /* Already running as root / superuser */
+    }
+
+    /* Check if help requested or user explicitly opted out of elevation */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 ||
+            strcmp(argv[i], "--help") == 0 ||
+            strcmp(argv[i], "--no-root") == 0 ||
+            strcmp(argv[i], "--no-su") == 0 ||
+            strcmp(argv[i], "--allow-unprivileged") == 0) {
+            return;
+        }
+    }
+
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+    } else {
+        if (!realpath(argv[0], exe_path)) {
+            strncpy(exe_path, argv[0], sizeof(exe_path) - 1);
+            exe_path[sizeof(exe_path) - 1] = '\0';
+        }
+    }
+
+    /* Environment variables to forward into the elevated root session */
+    static const char *forward_env[] = {
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "DBUS_SESSION_BUS_ADDRESS",
+        NULL
+    };
+
+    /* 1. Try pkexec (Polkit desktop graphical authorization dialog) */
+    char *pk_args[128];
+    int p = 0;
+    pk_args[p++] = "pkexec";
+    pk_args[p++] = "env";
+
+    for (int i = 0; forward_env[i] != NULL; i++) {
+        const char *val = getenv(forward_env[i]);
+        if (val && val[0]) {
+            size_t elen = strlen(forward_env[i]) + strlen(val) + 2;
+            char *env_str = (char *)malloc(elen);
+            if (env_str) {
+                snprintf(env_str, elen, "%s=%s", forward_env[i], val);
+                pk_args[p++] = env_str;
+            }
+        }
+    }
+
+    pk_args[p++] = exe_path;
+    for (int i = 1; i < argc && p < 120; i++) {
+        pk_args[p++] = argv[i];
+    }
+    pk_args[p] = NULL;
+
+    fprintf(stderr, "[*] OpenIFWD GUI requires superuser (root) privileges for raw USB flashing.\n");
+    fprintf(stderr, "[*] Requesting authorization via pkexec...\n");
+    execvp("pkexec", pk_args);
+
+    /* 2. Fallback to sudo -E if pkexec binary is missing */
+    fprintf(stderr, "[*] pkexec not available, falling back to sudo -E...\n");
+    char *sudo_args[128];
+    int s = 0;
+    sudo_args[s++] = "sudo";
+    sudo_args[s++] = "-E";
+    sudo_args[s++] = exe_path;
+    for (int i = 1; i < argc && s < 120; i++) {
+        sudo_args[s++] = argv[i];
+    }
+    sudo_args[s] = NULL;
+    execvp("sudo", sudo_args);
+
+    /* 3. Fallback to su */
+    fprintf(stderr, "[*] sudo not available, falling back to su...\n");
+    char su_cmd[4096];
+    int pos = 0;
+    for (int i = 0; forward_env[i] != NULL; i++) {
+        const char *val = getenv(forward_env[i]);
+        if (val && val[0]) {
+            pos += snprintf(su_cmd + pos, sizeof(su_cmd) - pos, "%s=\"%s\" ", forward_env[i], val);
+        }
+    }
+    pos += snprintf(su_cmd + pos, sizeof(su_cmd) - pos, "\"%s\" ", exe_path);
+    for (int i = 1; i < argc && pos < (int)sizeof(su_cmd) - 64; i++) {
+        pos += snprintf(su_cmd + pos, sizeof(su_cmd) - pos, "\"%s\" ", argv[i]);
+    }
+
+    char *su_args[] = { "su", "-c", su_cmd, NULL };
+    execvp("su", su_args);
+
+    fprintf(stderr, "[-] Failed to obtain superuser (root) privileges.\n");
+    fprintf(stderr, "[-] Please start the application with: sudo %s\n", exe_path);
+    exit(1);
+}
+
 int main(int argc, char **argv) {
+    ensure_root_privileges(argc, argv);
+
     gtk_init(&argc, &argv);
     apply_app_css();
 
@@ -854,6 +959,9 @@ int main(int argc, char **argv) {
     scan_and_populate_ports(GTK_COMBO_BOX_TEXT(g_app.combo_port));
 
     log_to_gui("[*] OpenIFWD GUI initialized.\n");
+    if (geteuid() == 0) {
+        log_to_gui("[+] Superuser privileges active (root / UID 0).\n");
+    }
     log_to_gui("[*] Default: Built-in Open Rust PSI enabled (NVRAM write protected, RAM boot supported).\n");
     log_to_gui("[*] Select your firmware or binary payload files to proceed.\n");
 
