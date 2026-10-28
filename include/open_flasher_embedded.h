@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 /* Standalone Open Flasher (Stage 2 in SDRAM at 0x60000000 / 0x60000400) */
-extern const uint8_t open_flasher_binary[3504];
+extern const uint8_t open_flasher_binary[3732];
 extern const size_t open_flasher_size;
 extern const uint8_t open_flasher_checksum;
 

@@ -1477,7 +1477,25 @@ int flasher_ofls_erase(flasher_session_t *s, uint32_t block, uint32_t count) {
         return -EPERM;
     }
 
-    fprintf(stderr, "[-] OFLS Block Erase failed (status: 0x%08X, erased: %u)\n", resp.status, resp.bytes_done);
+    uint16_t ctrl_stat = (uint16_t)((resp.bytes_done >> 16) & 0xFFFF);
+    uint16_t wp_stat   = (uint16_t)(resp.bytes_done & 0xFFFF);
+    uint16_t int_stat  = (uint16_t)(resp.crc32 & 0xFFFF);
+
+    fprintf(stderr, "\n[-] ====================================================================\n");
+    fprintf(stderr, "[-] OFLS Block Erase FAILED (status code 0x%08X)\n", resp.status);
+    fprintf(stderr, "[-] OneNAND Hardware Diagnostics:\n");
+    fprintf(stderr, "[-]   CTRL_STATUS (0x1E480): 0x%04X\n", ctrl_stat);
+    if (ctrl_stat & 0x0400) fprintf(stderr, "[-]     -> Bit 10: Erase/Program Hardware Error\n");
+    if (ctrl_stat & 0x0100) fprintf(stderr, "[-]     -> Bit  8: Locked Block Access Violation\n");
+    if (ctrl_stat & 0x8000) fprintf(stderr, "[-]     -> Bit 15: Operation still Ongoing\n");
+    fprintf(stderr, "[-]   WP_STATUS   (0x1E49C): 0x%04X\n", wp_stat);
+    fprintf(stderr, "[-]     -> Bit 2 (US)  = %u (%s)\n", (wp_stat >> 2) & 1, (wp_stat & 4) ? "Unlocked" : "NOT Unlocked");
+    fprintf(stderr, "[-]     -> Bit 1 (LS)  = %u (%s)\n", (wp_stat >> 1) & 1, (wp_stat & 2) ? "LOCKED" : "Not Locked");
+    fprintf(stderr, "[-]     -> Bit 0 (LTS) = %u (%s)\n", wp_stat & 1, (wp_stat & 1) ? "LOCKED-TIGHT (Hardware WP/Reset Required)" : "Not Locked-Tight");
+    fprintf(stderr, "[-]   INT_STATUS  (0x1E482): 0x%04X\n", int_stat);
+    fprintf(stderr, "[-]     -> Bit 15 (INT_MASTER) = %u\n", (int_stat >> 15) & 1);
+    fprintf(stderr, "[-]     -> Bit  5 (INT_ERASE)  = %u\n", (int_stat >> 5) & 1);
+    fprintf(stderr, "[-] ====================================================================\n\n");
     return -1;
 }
 
