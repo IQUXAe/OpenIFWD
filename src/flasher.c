@@ -1727,14 +1727,14 @@ int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
     uint32_t max_blocks  = ONENAND_PART_CODE_BLOCKS;
     const char *label    = "CODE/BSY";
 
-    if (strstr(fls_path, "cds") || strstr(fls_path, "CDS") || strstr(fls_path, "csc") || strstr(fls_path, "CSC")) {
-        start_block = ONENAND_PART_CSC_START;
-        max_blocks  = ONENAND_PART_CSC_BLOCKS;
-        label       = "CSC/CDS";
-    } else if (strstr(fls_path, "dffs") || strstr(fls_path, "DFFS") || strstr(fls_path, "ifs") || strstr(fls_path, "IFS")) {
+    if (strstr(fls_path, "dffs") || strstr(fls_path, "DFFS") || strstr(fls_path, "ifs") || strstr(fls_path, "IFS")) {
         start_block = ONENAND_PART_IFS_START;
         max_blocks  = ONENAND_PART_IFS_BLOCKS;
         label       = "IFS/DFFS";
+    } else if (strstr(fls_path, "cds") || strstr(fls_path, "CDS") || strstr(fls_path, "csc") || strstr(fls_path, "CSC")) {
+        start_block = ONENAND_PART_CSC_START;
+        max_blocks  = ONENAND_PART_CSC_BLOCKS;
+        label       = "CSC/CDS";
     } else if (strstr(fls_path, "slb") || strstr(fls_path, "SLB")) {
         start_block = ONENAND_PART_EBL_START;
         max_blocks  = ONENAND_PART_EBL_BLOCKS;
@@ -1905,7 +1905,7 @@ int flasher_flash(flasher_session_t *s) {
     }
 
     /* D. BSY section FLS (--bsy) */
-    if (s->config.bsy_path) {
+    if (s->config.bsy_path && (!s->config.fls_path || strcmp(s->config.bsy_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.bsy_path) != 0) {
             return -1;
         }
@@ -1913,7 +1913,7 @@ int flasher_flash(flasher_session_t *s) {
     }
 
     /* E. CDS section FLS (--cds) */
-    if (s->config.cds_path) {
+    if (s->config.cds_path && (!s->config.fls_path || strcmp(s->config.cds_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.cds_path) != 0) {
             return -1;
         }
@@ -1921,7 +1921,7 @@ int flasher_flash(flasher_session_t *s) {
     }
 
     /* F. DFFS / CSC section (--dffs) */
-    if (!s->config.skip_csc && s->config.dffs_path) {
+    if (!s->config.skip_csc && s->config.dffs_path && (!s->config.fls_path || strcmp(s->config.dffs_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.dffs_path) != 0) {
             return -1;
         }
