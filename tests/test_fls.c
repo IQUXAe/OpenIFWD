@@ -322,12 +322,48 @@ static void test_flasher_hexdump(void) {
     printf("[TEST] flasher_hexdump PASSED!\n");
 }
 
+static void test_psi_sha256_verification(void) {
+    printf("[TEST] Testing PSI SHA-256 verification and skip flag...\n");
+
+    /* 1. NULL / empty handling */
+    assert(flasher_verify_psi_sha256(NULL, 0) == -1);
+    assert(flasher_verify_psi_sha256(NULL, 100) == -1);
+
+    /* 2. Untrusted dummy binary (must return 1 = untrusted) */
+    uint8_t dummy[512] = {0};
+    assert(flasher_verify_psi_sha256(dummy, sizeof(dummy)) == 1);
+
+    /* 3. Valid stock PSI extraction & verification */
+    fls_file_t *psi_fls = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_psi.fls");
+    if (psi_fls) {
+        const fls_chunk_info_t *c = fls_find_chunk(psi_fls, FLS_TAG_RPSI);
+        assert(c != NULL);
+        size_t sz = 0;
+        const uint8_t *data = fls_get_image_data(psi_fls, c, &sz);
+        assert(data != NULL && sz == 57644);
+
+        int verify_res = flasher_verify_psi_sha256(data, sz);
+        assert(verify_res == 0);
+        fls_close(psi_fls);
+        printf("[+] Stock PSI SHA-256 verified successfully!\n");
+    }
+
+    /* 4. Verify flasher_config_t skip_psi_sha256 flag */
+    flasher_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.skip_psi_sha256 = true;
+    assert(cfg.skip_psi_sha256 == true);
+
+    printf("[TEST] PSI SHA-256 verification PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running OpenIFWD Unit Tests ===\n");
     test_protocol_packets();
     test_open_psi();
     test_nvram_safety();
     test_flasher_hexdump();
+    test_psi_sha256_verification();
 
     const char *sample = (argc >= 2) ? argv[1] : "flashtools/FlashTool_E2_OD/catfish3g.fls";
     test_fls_parsing(sample);

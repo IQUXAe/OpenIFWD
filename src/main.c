@@ -113,6 +113,8 @@ static void print_usage(const char *prog) {
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
     printf("  --psi <file.fls/bin>    Vendor PSI Stage 1 container (.fls) or raw binary (auto-detected if omitted)\n");
+    printf("  --skip-psi-sha256       Skip SHA-256 integrity verification of PSI binary\n");
+    printf("  --skip-psi-check        Alias for --skip-psi-sha256\n");
     printf("  --slb <file.fls>        Second Level Bootloader (_slb.fls, Block 2..9)\n");
     printf("  --bsy <file.fls>        Baseband system code (_BSY.fls)\n");
     printf("  --cds <file.fls>        Customer Data System (_CDS.fls)\n");
@@ -332,6 +334,10 @@ int main(int argc, char **argv) {
             {"no-autodetect", no_argument,   0, 1013},
             {"auto",      no_argument,       0, 1014},
             {"force-auto", no_argument,      0, 1014},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -356,6 +362,7 @@ int main(int argc, char **argv) {
                 case 1008: cfg.force_dangerous_erase = true; break;
                 case 1013: cfg.no_auto = true; break;
                 case 1014: cfg.force_auto = true; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -425,6 +432,11 @@ int main(int argc, char **argv) {
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
             {"out",       required_argument, 0, 'o'},
+            {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -436,6 +448,8 @@ int main(int argc, char **argv) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 'o': out_path = optarg; break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -487,6 +501,10 @@ int main(int argc, char **argv) {
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"out",       required_argument, 0, 'o'},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
@@ -500,6 +518,7 @@ int main(int argc, char **argv) {
                 case 'p': port = optarg; break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -564,6 +583,10 @@ int main(int argc, char **argv) {
             {"chunk",      required_argument, 0, 'c'},
             {"chunk-size", required_argument, 0, 'c'},
             {"psi",        required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",    no_argument,       0, 'v'},
             {"help",       no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -579,6 +602,7 @@ int main(int argc, char **argv) {
                 case 'o': out_path = optarg; break;
                 case 'c': chunk_size = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -661,6 +685,10 @@ int main(int argc, char **argv) {
             {"out",         required_argument, 0, 'o'},
             {"output",      required_argument, 0, 'o'},
             {"psi",         required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",     no_argument,       0, 'v'},
             {"help",        no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -675,6 +703,7 @@ int main(int argc, char **argv) {
                 case 'c': block_count = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -741,6 +770,10 @@ int main(int argc, char **argv) {
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -752,6 +785,7 @@ int main(int argc, char **argv) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -777,6 +811,10 @@ int main(int argc, char **argv) {
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -788,6 +826,7 @@ int main(int argc, char **argv) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -813,6 +852,10 @@ int main(int argc, char **argv) {
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -824,6 +867,7 @@ int main(int argc, char **argv) {
             switch (opt) {
                 case 'p': port = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -863,6 +907,10 @@ int main(int argc, char **argv) {
             {"all",       no_argument,       0, 'a'},
             {"full",      no_argument,       0, 'a'},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -895,6 +943,7 @@ int main(int argc, char **argv) {
                     max_lines = 0;
                     break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -948,6 +997,10 @@ int main(int argc, char **argv) {
             {"count",     required_argument, 0, 'c'},
             {"force-dangerous-erase", no_argument, 0, 1002},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -962,6 +1015,7 @@ int main(int argc, char **argv) {
                 case 'c': count = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1002: cfg.force_dangerous_erase = true; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -995,6 +1049,10 @@ int main(int argc, char **argv) {
             {"in",        required_argument, 0, 'i'},
             {"force-dangerous-erase", no_argument, 0, 1002},
             {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -1017,6 +1075,7 @@ int main(int argc, char **argv) {
                 case 'i': in_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1002: cfg.force_dangerous_erase = true; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;

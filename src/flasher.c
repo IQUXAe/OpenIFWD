@@ -53,6 +53,30 @@ int flasher_verify_psi_sha256(const uint8_t *psi_data, size_t psi_len) {
     return 1;
 }
 
+static int check_psi_integrity(flasher_session_t *s, const uint8_t *psi_data, size_t psi_size, uint8_t *allocated_psi) {
+    if (!psi_data || psi_size == 0) {
+        if (allocated_psi) free(allocated_psi);
+        return -1;
+    }
+
+    if (s && s->config.skip_psi_sha256) {
+        uint8_t hash[32];
+        char hex[65];
+        sha256_calc(psi_data, psi_size, hash);
+        sha256_to_hex(hash, hex);
+        printf("[*] Skipping PSI SHA-256 integrity check (hash: %s, --skip-psi-sha256 enabled)\n", hex);
+        return 0;
+    }
+
+    if (flasher_verify_psi_sha256(psi_data, psi_size) != 0) {
+        fprintf(stderr, "[-] ERROR: Untrusted or unknown PSI binary!\n");
+        fprintf(stderr, "[-] To proceed anyway with this custom PSI, pass --skip-psi-sha256 (or --skip-psi-check).\n");
+        if (allocated_psi) free(allocated_psi);
+        return -1;
+    }
+    return 0;
+}
+
 flasher_session_t *flasher_create(transport_t *transport, const flasher_config_t *cfg) {
     if (!transport || !cfg) return NULL;
 
@@ -354,7 +378,9 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     }
 
     /* Verify SHA-256 against trusted table */
-    flasher_verify_psi_sha256(psi_data, psi_size);
+    if (check_psi_integrity(s, psi_data, psi_size, allocated_psi) != 0) {
+        return -1;
+    }
 
     /* Boot ROM Header: Command 0x30, length uint16_le */
     uint8_t boot_hdr[3];
@@ -677,7 +703,9 @@ int flasher_start_ram_dumper(flasher_session_t *s) {
     printf("[*] Preparing verified PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
 
     /* Verify SHA-256 against trusted table */
-    flasher_verify_psi_sha256(psi_data, psi_size);
+    if (check_psi_integrity(s, psi_data, psi_size, allocated_psi) != 0) {
+        return -1;
+    }
 
     uint8_t boot_hdr[3];
     boot_hdr[0] = 0x30;
@@ -1263,7 +1291,9 @@ int flasher_start_open_flasher(flasher_session_t *s) {
     printf("[*] Preparing verified PSI Stage 1 (%zu bytes, XOR-8 0x%02X)...\n", psi_size, psi_chk);
 
     /* Verify SHA-256 against trusted table */
-    flasher_verify_psi_sha256(psi_data, psi_size);
+    if (check_psi_integrity(s, psi_data, psi_size, allocated_psi) != 0) {
+        return -1;
+    }
 
     uint8_t boot_hdr[3];
     boot_hdr[0] = 0x30;

@@ -76,6 +76,7 @@ typedef struct {
     GtkWidget *entry_dffs;
 
     GtkWidget *check_erase;
+    GtkWidget *check_skip_psi;
     GtkWidget *check_ram_only;
     GtkWidget *entry_ram_addr;
 
@@ -323,6 +324,7 @@ typedef struct {
     char *port;
     uint32_t baudrate;
     bool is_usb;
+    bool skip_psi_sha256;
     char *psi_path;
     char *out_path;
 } nvram_worker_args_t;
@@ -354,6 +356,7 @@ static void *worker_nvram_thread(void *arg) {
     cfg.is_usb = args->is_usb;
     cfg.baudrate = args->baudrate;
     cfg.psi_path = args->psi_path;
+    cfg.skip_psi_sha256 = args->skip_psi_sha256;
 
     flasher_session_t *s = flasher_create(trans, &cfg);
     if (!s) {
@@ -389,6 +392,7 @@ typedef struct {
     char *port;
     uint32_t baudrate;
     bool is_usb;
+    bool skip_psi_sha256;
     char *psi_path;
     char *payload_path;
     uint32_t target_addr;
@@ -466,6 +470,7 @@ static void *worker_ramboot_thread(void *arg) {
     cfg.is_usb = args->is_usb;
     cfg.baudrate = args->baudrate;
     cfg.psi_path = args->psi_path;
+    cfg.skip_psi_sha256 = args->skip_psi_sha256;
 
     flasher_session_t *s = flasher_create(trans, &cfg);
     if (!s) {
@@ -515,6 +520,7 @@ static void on_btn_start_clicked(GtkButton *btn, gpointer user_data) {
     const char *dffs_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_dffs));
     if (dffs_txt && strlen(dffs_txt) > 0) cfg->dffs_path = strdup(dffs_txt);
     cfg->erase_all = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_erase));
+    cfg->skip_psi_sha256 = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_skip_psi));
 
     const char *addr_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_ram_addr));
     cfg->ram_exec_addr = (addr_txt && strlen(addr_txt) > 0) ? (uint32_t)strtoul(addr_txt, NULL, 0) : 0x60000000;
@@ -561,6 +567,7 @@ static void on_btn_backup_nvram_clicked(GtkButton *btn, gpointer user_data) {
     args->port = port ? strdup(port) : strdup("usb");
     args->baudrate = baud_str ? (uint32_t)atoi(baud_str) : 921600;
     args->is_usb = (strstr(args->port, "usb") != NULL || strstr(args->port, "USB") != NULL);
+    args->skip_psi_sha256 = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_skip_psi));
     gboolean builtin_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
     const char *psi_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_psi));
     if (!builtin_psi && psi_txt && strlen(psi_txt) > 0) {
@@ -604,6 +611,7 @@ static void on_btn_ramboot_clicked(GtkButton *btn, gpointer user_data) {
     args->port = port ? strdup(port) : strdup("usb");
     args->baudrate = baud_str ? (uint32_t)atoi(baud_str) : 921600;
     args->is_usb = (strstr(args->port, "usb") != NULL || strstr(args->port, "USB") != NULL);
+    args->skip_psi_sha256 = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_skip_psi));
     gboolean builtin_psi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app.check_builtin_psi));
     const char *psi_txt = gtk_entry_get_text(GTK_ENTRY(g_app.entry_psi));
     if (!builtin_psi && psi_txt && strlen(psi_txt) > 0) {
@@ -800,6 +808,9 @@ int main(int argc, char **argv) {
     gtk_grid_attach(GTK_GRID(grid_opts), g_app.check_ram_only, 1, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid_opts), lbl_ram_addr, 2, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid_opts), g_app.entry_ram_addr, 3, 0, 1, 1);
+
+    g_app.check_skip_psi = gtk_check_button_new_with_label("Skip PSI SHA-256 integrity verification");
+    gtk_grid_attach(GTK_GRID(grid_opts), g_app.check_skip_psi, 0, 1, 2, 1);
 
     gtk_box_pack_start(GTK_BOX(main_box), frame_opts, FALSE, FALSE, 0);
 
