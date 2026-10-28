@@ -155,30 +155,6 @@ int ifwd_parse_packet(const uint8_t *buf, size_t len,
     return (int)expected_total;
 }
 
-size_t protocol_build_ebl_packet(uint16_t msg_type, const void *payload, uint32_t payload_len,
-                                 uint8_t *out_buf, size_t max_buf_len, size_t total_wire_len) {
-    if (!out_buf || max_buf_len < total_wire_len || total_wire_len < sizeof(ebl_pkt_hdr_t)) {
-        return 0;
-    }
-
-    memset(out_buf, 0x00, total_wire_len);
-
-    ebl_pkt_hdr_t *hdr = (ebl_pkt_hdr_t *)out_buf;
-    hdr->msg_type = msg_type;
-    hdr->length = payload_len;
-
-    if (payload && payload_len > 0) {
-        size_t copy_len = (payload_len <= total_wire_len - sizeof(ebl_pkt_hdr_t)) ?
-                          (size_t)payload_len : (total_wire_len - sizeof(ebl_pkt_hdr_t));
-        memcpy(out_buf + sizeof(ebl_pkt_hdr_t), payload, copy_len);
-    }
-
-    /* Calculate checksum across msg_type, length, and payload */
-    hdr->checksum = protocol_calc_checksum(msg_type, payload_len, (const uint8_t *)payload);
-
-    return total_wire_len;
-}
-
 uint16_t openifwd_calc_crc16(const uint8_t *data, size_t len) {
     uint16_t crc = 0xFFFF;
     if (!data) return crc;

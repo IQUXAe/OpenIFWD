@@ -69,7 +69,7 @@ extern "C" {
 
 /* High-speed USB buffer sizes (V3/V4 EBL protocol) */
 #define EBL_USB_DATA_BLOCK           16384
-#define EBL_USB_PACKET_SIZE          16392  /* sizeof(ebl_pkt_hdr_t) (8) + EBL_USB_DATA_BLOCK (16384) */
+#define EBL_USB_PACKET_SIZE          16392  /* 8 (header) + EBL_USB_DATA_BLOCK (16384) */
 
 /* Status codes */
 #define IFWD_STATUS_OK               0x00
@@ -111,51 +111,6 @@ typedef struct __attribute__((packed)) {
 } ifwd_req_prot_conf_t;
 _Static_assert(sizeof(ifwd_req_prot_conf_t) == 28, "ifwd_req_prot_conf_t must be exactly 28 bytes");
 
-/* EBL 8-byte Packet Header (V3/V4 framing) */
-typedef struct __attribute__((packed)) {
-    union {
-        uint16_t checksum;   /* EBL mathematical packet checksum: sum = msg + (len>>16) + (len&0xFFFF) + sum(payload) */
-        uint16_t token;      /* Historic alias */
-    };
-    uint16_t msg_type;   /* e.g. 0x0086 (ReqSetProtConf) */
-    uint32_t length;     /* Payload length */
-} ebl_pkt_hdr_t;
-_Static_assert(sizeof(ebl_pkt_hdr_t) == 8, "ebl_pkt_hdr_t must be 8 bytes");
-
-/* EBL 76-byte Target Identification / Announcement (Frame 128) */
-typedef struct __attribute__((packed)) {
-    uint32_t magic;      /* 0x000000BB */
-    uint32_t proto_ver;  /* 0x00000003 */
-    uint32_t channel;    /* 0x00000001 */
-    char     chip_id[32];/* "2150_OD_KL1_3.1" (null-padded) */
-    uint8_t  capabilities[32]; /* 32 bytes capability flags */
-} ebl_target_announce_t;
-_Static_assert(sizeof(ebl_target_announce_t) == 76, "ebl_target_announce_t must be 76 bytes");
-
-/* EBL 72-byte ReqSetProtConf Payload (Frame 129) */
-typedef struct __attribute__((packed)) {
-    uint32_t magic;      /* 0x000000BB */
-    uint32_t proto_ver;  /* 0x00000003 */
-    uint32_t channel;    /* 0x00000001 */
-    char     chip_id[32];/* "2150_OD_KL1_3.1" */
-    uint8_t  flags[28];  /* 28 bytes configuration flags */
-} ebl_req_prot_conf_t;
-_Static_assert(sizeof(ebl_req_prot_conf_t) == 72, "ebl_req_prot_conf_t must be 72 bytes");
-
-/* EBL 8-byte RspSetProtConf Status (Frame 130) */
-typedef struct __attribute__((packed)) {
-    union {
-        uint16_t checksum;   /* Response checksum (offset 0..1) */
-        uint16_t msg_type;   /* Historic alias */
-        uint16_t token;
-    };
-    union {
-        uint16_t ack_type;   /* Response opcode / ACK type (offset 2..3) */
-        uint16_t opcode;
-    };
-    uint32_t status_len; /* 0x00000002 */
-} ebl_rsp_prot_conf_t;
-_Static_assert(sizeof(ebl_rsp_prot_conf_t) == 8, "ebl_rsp_prot_conf_t must be 8 bytes");
 
 /* Request Flash Set Address */
 typedef struct __attribute__((packed)) {
@@ -208,9 +163,6 @@ size_t ifwd_build_packet(uint8_t channel, uint16_t msg_type,
 
 int ifwd_parse_packet(const uint8_t *buf, size_t len,
                       ifwd_pkt_hdr_t *out_hdr, const uint8_t **out_payload);
-
-size_t protocol_build_ebl_packet(uint16_t msg_type, const void *payload, uint32_t payload_len,
-                                 uint8_t *out_buf, size_t max_buf_len, size_t total_wire_len);
 
 /* ========================================================================= */
 /* OpenIFWD Standard Protocol Definitions (Replaces proprietary EBL)         */

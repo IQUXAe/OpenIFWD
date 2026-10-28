@@ -42,8 +42,6 @@ typedef struct {
     uint32_t target_platform;
     uint16_t openifwd_seq;
     openifwd_hw_info_t hw_info;
-    bool has_sec_cfg;
-    uint8_t sec_cfg[2048];
 } flasher_session_t;
 
 /* NVRAM / EEPROM Protected Range: Blocks 4..11 (0x60080000 - 0x60180000, 1 MB) */
@@ -132,7 +130,6 @@ int flasher_verify_psi_sha256(const uint8_t *psi_data, size_t psi_len);
 int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path, uint32_t start_block, uint32_t max_blocks, const char *label);
 int flasher_flash_slb(flasher_session_t *s, const char *slb_path);
 int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path);
-int flasher_init_sec_cfg(flasher_session_t *s, const char *fls_path);
 
 /* Open Flasher (OFLS / RESP) Protocol API */
 #define MAGIC_OFLS_CMD               0x534C464FU /* 'OFLS' */

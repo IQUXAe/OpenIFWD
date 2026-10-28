@@ -1722,64 +1722,11 @@ int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path
     return 0;
 }
 
-int flasher_init_sec_cfg(flasher_session_t *s, const char *fls_path) {
-    if (!s || !fls_path || access(fls_path, R_OK) != 0) {
-        return -1;
-    }
-
-    fls_file_t *fls = fls_open(fls_path);
-    if (!fls) {
-        return -1;
-    }
-
-    size_t sec_len = 0;
-    const uint8_t *sec_data = fls_get_sec_cfg(fls, &sec_len);
-    if (!sec_data || sec_len != 2048) {
-        fls_close(fls);
-        return 0;
-    }
-
-    /* Copy raw 2048-byte Tag 15 SEC_CFG into session context */
-    memcpy(s->sec_cfg, sec_data, 2048);
-    s->has_sec_cfg = true;
-
-    printf("\n[*] Initializing Security Configuration (Tag 15) from: %s\n", fls_path);
-    printf("    SEC_CFG Size: 2048 bytes loaded into session\n");
-
-    /* Validate magic at offset 1916 (0x77C) */
-    uint32_t magic = *(const uint32_t *)(sec_data + 1916);
-    if (magic == FLS_SEC_CFG_MAGIC) {
-        printf("[+] Security Signature: 0x%08X (FLS_SEC_CFG_MAGIC Verified)\n", magic);
-    } else {
-        printf("[!] Security Signature: 0x%08X (Expected 0x%08X)\n", magic, FLS_SEC_CFG_MAGIC);
-    }
-    printf("[+] Target Security Profile: 2150_OD_KL1_3.1 (Secured)\n");
-
-    /* Parse partition entries */
-    fls_sec_cfg_entry_t entries[8];
-    size_t count = 0;
-    if (fls_get_sec_cfg_entries(fls, entries, 8, &count) == 0 && count > 0) {
-        printf("[+] Security Partition Descriptors (%zu found):\n", count);
-        for (size_t e = 0; e < count; e++) {
-            printf("    [%zu] Load Addr: 0x%08X, Max Size: %6u KB, Image Size: %6u KB\n",
-                   e + 1, entries[e].load_address,
-                   entries[e].partition_size / 1024,
-                   entries[e].image_size / 1024);
-        }
-    }
-
-    fls_close(fls);
-    return 0;
-}
-
 int flasher_flash_slb(flasher_session_t *s, const char *slb_path) {
     if (!s || !slb_path || access(slb_path, R_OK) != 0) {
         fprintf(stderr, "[-] Cannot access SLB container: %s (%s)\n", slb_path ? slb_path : "<null>", strerror(errno));
         return -1;
     }
-
-    /* Initialize SEC_CFG from SLB container if available */
-    flasher_init_sec_cfg(s, slb_path);
 
     printf("\n================================================================================\n");
     printf("[*] Flashing Second Level Bootloader (SLB): %s\n", slb_path);
@@ -1882,9 +1829,6 @@ int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
     if (strstr(fls_path, "slb") || strstr(fls_path, "SLB")) {
         return flasher_flash_slb(s, fls_path);
     }
-
-    /* Initialize SEC_CFG from container if available */
-    flasher_init_sec_cfg(s, fls_path);
 
     printf("\n[*] Processing FLS container: %s\n", fls_path);
     fls_file_t *fls = fls_open(fls_path);
@@ -2024,15 +1968,7 @@ int flasher_flash(flasher_session_t *s) {
         return -1;
     }
 
-    /* 3. Initialize Security Configuration (Tag 15, 2048 bytes) from primary firmware container */
-    const char *primary_fls = s->config.slb_path ? s->config.slb_path :
-                             (s->config.fls_path ? s->config.fls_path :
-                             (s->config.bsy_path ? s->config.bsy_path : s->config.psi_path));
-    if (primary_fls) {
-        flasher_init_sec_cfg(s, primary_fls);
-    }
-
-    /* 4. Execute requested flash operations */
+    /* 3. Execute requested flash operations */
     int flashed_count = 0;
 
     /* A. Dedicated SLB section FLS (--slb) -> Blocks 2..4 (Second Level Bootloader flashed FIRST) */
