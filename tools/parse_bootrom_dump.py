@@ -87,7 +87,7 @@ def print_registers(reg_bytes: bytes):
 
 def analyze_bootrom(rom_bytes: bytes):
     print("=" * 80)
-    print("Physical Silicon Boot ROM Analysis (65,536 bytes / 64 KB)")
+    print(f"Physical Silicon Boot ROM Analysis ({len(rom_bytes):,} bytes / {len(rom_bytes) // 1024} KB)")
     print("=" * 80)
 
     # Hashes
@@ -157,10 +157,13 @@ def analyze_bootrom(rom_bytes: bytes):
 
 def main():
     parser = argparse.ArgumentParser(description="Parse Boot ROM & register dump from Samsung GT-S5222 / Infineon PMB8815")
-    parser.add_argument("-i", "--input", default="bootrom_dump_with_regs.bin",
-                        help="Input dump file (default: bootrom_dump_with_regs.bin)")
-    parser.add_argument("-o", "--output", default="bootrom_64k.bin",
-                        help="Output pure 64 KB Boot ROM file (default: bootrom_64k.bin)")
+    default_in = "bootrom_pmb8815_32k.bin" if os.path.isfile("bootrom_pmb8815_32k.bin") else (
+        "infineon_pmb8815_bootrom_64k.bin" if os.path.isfile("infineon_pmb8815_bootrom_64k.bin") else "bootrom_pmb8815_32k.bin"
+    )
+    parser.add_argument("-i", "--input", default=default_in,
+                        help=f"Input dump file (default: {default_in})")
+    parser.add_argument("-o", "--output", default="bootrom_pmb8815_32k.bin",
+                        help="Output pure Boot ROM file (default: bootrom_pmb8815_32k.bin)")
     parser.add_argument("-r", "--regs", default=None,
                         help="Optional separate register dump file (if dumped separately)")
     parser.add_argument("--regs-only", action="store_true",
@@ -207,7 +210,15 @@ def main():
             with open(args.regs, "rb") as rf:
                 reg_bytes = rf.read(64)
 
-    # 4. 64 bytes: Pure register dump
+    # 4. 32768 bytes (0x8000): Pure 32 KB PMB8815 Physical Mask Boot ROM (0x00400000)
+    elif file_size == 0x8000:
+        print("[+] Detected pure 32 KB PMB8815 Physical Mask Boot ROM dump (0x00400000 - 0x00407FFF)")
+        rom_bytes = data
+        if args.regs and os.path.isfile(args.regs):
+            with open(args.regs, "rb") as rf:
+                reg_bytes = rf.read(64)
+
+    # 5. 64 bytes: Pure register dump
     elif file_size == 64:
         print("[+] Detected 64-byte register dump")
         reg_bytes = data
@@ -243,12 +254,12 @@ def main():
 
     # Save and analyze Boot ROM
     if rom_bytes:
-        if len(rom_bytes) != 65536:
-            print(f"[-] Warning: ROM slice size is {len(rom_bytes)} bytes (expected 65536)")
+        if len(rom_bytes) not in (32768, 65536):
+            print(f"[-] Warning: ROM slice size is {len(rom_bytes)} bytes (expected 32768 or 65536)")
 
         with open(args.output, "wb") as f:
             f.write(rom_bytes)
-        print(f"[+] Saved pure 64 KB Boot ROM to: {args.output}")
+        print(f"[+] Saved pure {len(rom_bytes) // 1024} KB Boot ROM to: {args.output}")
 
         analyze_bootrom(rom_bytes)
     else:

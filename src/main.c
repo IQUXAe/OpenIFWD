@@ -71,7 +71,7 @@ static void print_usage(const char *prog) {
     printf("  info     <file.fls>               Inspect FLS header, chunks and TOC\n");
     printf("  unpack   <file.fls> [out_dir]     Extract binary chunks from FLS container\n");
     printf("  scan                              Scan for connected phone TTY ports\n");
-    printf("  dump-bootrom -p <port> [-o <file>] Extract 64KB Boot ROM (PMB8815 silicon ROM)\n");
+    printf("  dump-bootrom -p <port> [-o <file>] Extract 32KB Boot ROM (PMB8815 physical mask ROM 0x00400000)\n");
     printf("  dump-nvram -p <port> [-o <file>]  Safely backup 1MB NVRAM/EEPROM (IMEI & RF calibrations)\n");
     printf("  dump-nand  -p <port> -b <block> -c <count> -o <file> Dump raw OneNAND physical flash blocks\n");
     printf("  dump-memory -p <port> -a <hex> -l <len> -o <file> [-c <chunk>] Read arbitrary memory range\n");
@@ -80,7 +80,7 @@ static void print_usage(const char *prog) {
     printf("  flash    [options]                Flash Samsung Star 3 (GT-S5222)\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
-    printf("  -o, --out, --output <file> Output file for dumps (default: bootrom_pmb8815.bin / s5222_nvram_backup.bin)\n");
+    printf("  -o, --out, --output <file> Output file for dumps (default: bootrom_pmb8815_32k.bin / s5222_nvram_backup.bin)\n");
     printf("  -b, --block, --start-block <num> Starting block for NAND dump (0..1023)\n");
     printf("  -c, --count, --block-count <num> Number of blocks to dump (default: 1)\n");
     printf("  -a, --addr, --address <hex> Base address for memory dump (e.g. 0xFFFF0000, 0x60080000)\n");
@@ -99,7 +99,7 @@ static void print_usage(const char *prog) {
     printf("  -v, --verbose           Enable verbose logging (hex dumps and USB packet traces)\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
-    printf("  %s dump-bootrom -p usb -o bootrom_pmb8815.bin -v\n", prog);
+    printf("  %s dump-bootrom -p usb -o bootrom_pmb8815_32k.bin -v\n", prog);
     printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 0 -c 1 -o nand_block0_boot.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 4 -c 8 -o nand_nvram_backup.bin -v\n", prog);
@@ -326,7 +326,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "dump-bootrom") == 0) {
         const char *port = NULL;
-        const char *out_path = "bootrom_pmb8815.bin";
+        const char *out_path = "bootrom_pmb8815_32k.bin";
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.baudrate = 921600;

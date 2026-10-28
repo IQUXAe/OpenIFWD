@@ -925,14 +925,14 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
         return -1;
     }
 
-    const uint32_t bootrom_size = 64 * 1024; /* 64 KB */
+    const uint32_t bootrom_base = 0x00400000;
+    const uint32_t bootrom_size = 32 * 1024; /* 32 KB (0x8000 bytes) */
     const uint32_t chunk_size = 2048;
-    const uint32_t num_chunks = bootrom_size / chunk_size; /* 32 chunks */
+    const uint32_t num_chunks = bootrom_size / chunk_size; /* 16 chunks */
 
     printf("\n================================================================================\n");
-    printf("[*] Starting Genuine Silicon Boot ROM Extraction via Standalone RAM Dumper\n");
-    printf("[*] Hardware Action: SCU REMAP un-masking (Register 0xE4900088 cleared)\n");
-    printf("[*] Target:          Physical Mask ROM 0x00000000 - 0x0000FFFF (64 KB)\n");
+    printf("[*] Starting Silicon Boot ROM Extraction via Standalone RAM Dumper\n");
+    printf("[*] Target:          Physical Mask ROM 0x00400000 - 0x00407FFF (32 KB)\n");
     printf("[*] Output File:     %s\n", out_path);
     printf("================================================================================\n");
 
@@ -949,17 +949,17 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     for (uint32_t i = 0; i < num_chunks; i++) {
-        uint32_t offset = i * chunk_size;
+        uint32_t addr = bootrom_base + i * chunk_size;
 
-        /* Build 16-byte command: MAGIC_CMD_DUMP_BOOTROM (0x42524F4D / "BROM"), offset, length, checksum */
+        /* Build 16-byte command: MAGIC_CMD_DUMP_BOOTROM (0x42524F4D / "BROM"), addr, length, checksum */
         uint32_t cmd_buf[4];
         cmd_buf[0] = MAGIC_CMD_DUMP_BOOTROM;
-        cmd_buf[1] = offset;
+        cmd_buf[1] = addr;
         cmd_buf[2] = chunk_size;
         cmd_buf[3] = cmd_buf[0] ^ cmd_buf[1] ^ cmd_buf[2];
 
         if (transport_write(s->transport, cmd_buf, 16) != 16) {
-            fprintf(stderr, "\n[-] Failed to send BROM command at offset 0x%04X\n", offset);
+            fprintf(stderr, "\n[-] Failed to send BROM command at address 0x%08X\n", addr);
             fclose(fout);
             return -1;
         }
@@ -969,8 +969,8 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
         while (read_bytes < chunk_size) {
             int n = transport_read(s->transport, rx_buf + read_bytes, chunk_size - read_bytes, 4000);
             if (n <= 0) {
-                fprintf(stderr, "\n[-] Timeout reading Boot ROM at offset 0x%04X (got %u / %u bytes)\n",
-                        offset, read_bytes, chunk_size);
+                fprintf(stderr, "\n[-] Timeout reading Boot ROM at address 0x%08X (got %u / %u bytes)\n",
+                        addr, read_bytes, chunk_size);
                 fclose(fout);
                 return -1;
             }
@@ -990,8 +990,8 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
         double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
         double speed_kb = (elapsed > 0.05) ? ((total_done / 1024.0) / elapsed) : 0.0;
         int pct = (int)((total_done * 100ULL) / bootrom_size);
-        printf("\r[*] Boot ROM Dump Progress: %3d%% (0x%04X / 0x%04X, %u KB, %.1f KB/s)   ",
-               pct, offset + chunk_size, bootrom_size, total_done / 1024, speed_kb);
+        printf("\r[*] Boot ROM Dump Progress: %3d%% (0x%08X / 0x%08X, %u KB, %.1f KB/s)   ",
+               pct, addr + chunk_size, bootrom_base + bootrom_size, total_done / 1024, speed_kb);
         fflush(stdout);
     }
 
@@ -1009,13 +1009,20 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
     if (vf) {
         uint32_t reset_vec = 0;
         if (fread(&reset_vec, 1, 4, vf) == 4) {
-            printf("[*] Silicon Boot ROM Reset Vector (at 0x00000000): 0x%08X\n", reset_vec);
+            printf("[*] Silicon Boot ROM Reset Vector (at 0x00400000): 0x%08X\n", reset_vec);
             if ((reset_vec & 0xFF000000) == 0xEA000000) {
                 uint32_t target_branch = (reset_vec & 0x00FFFFFF);
                 uint32_t abs_target = (target_branch << 2) + 8;
                 printf("[+] Valid ARM Branch instruction detected (entry point 0x%08X)!\n", abs_target);
             } else if ((reset_vec & 0xFFFF0000) == 0xE59F0000) {
-                printf("[+] Valid ARM LDR PC instruction detected at 0x00000000!\n");
+                uint32_t lit_offset = (reset_vec & 0x0FFF);
+                fseek(vf, lit_offset + 8, SEEK_SET);
+                uint32_t handler_addr = 0;
+                if (fread(&handler_addr, 1, 4, vf) == 4) {
+                    printf("[+] Valid ARM LDR PC instruction detected (Reset Entry Handler: 0x%08X)!\n", handler_addr);
+                } else {
+                    printf("[+] Valid ARM LDR PC instruction detected at 0x00400000!\n");
+                }
             }
         }
         fclose(vf);
