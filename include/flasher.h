@@ -24,6 +24,8 @@ typedef struct {
     bool erase_all;           /* Erase whole non-protected flash before writing */
     bool force_dangerous_erase; /* Allow erasing/writing protected calibration & metadata blocks (978..1023) */
     bool skip_csc;            /* Skip CSC / DFFS flashing */
+    bool no_auto;             /* Disable automatic detection of companion firmware files */
+    bool force_auto;          /* Force automatic detection even when explicit targets are specified */
     bool is_usb;              /* Direct USB connection (EP 0x02 OUT / EP 0x83 IN) */
     bool verbose;             /* Verbose logging (hex dumps, packet traces) */
     const char *ram_exec_bin; /* Binary to load into RAM */

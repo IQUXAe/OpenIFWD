@@ -36,7 +36,7 @@ static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_bsy, ch
         if (len < 4) continue;
 
         /* Match BSY */
-        if (!cfg->bsy_path && (strstr(name, "bsy") || strstr(name, "BSY")) && strcmp(name + len - 4, ".fls") == 0) {
+        if (!cfg->bsy_path && (!cfg->fls_path || !strstr(cfg->fls_path, name)) && (strstr(name, "bsy") || strstr(name, "BSY")) && strcmp(name + len - 4, ".fls") == 0) {
             if (snprintf(auto_bsy, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_bsy, R_OK) == 0) {
                 cfg->bsy_path = auto_bsy;
                 printf("[*] Auto-detected Baseband System (BSY): %s\n", cfg->bsy_path);
@@ -44,7 +44,7 @@ static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_bsy, ch
         }
 
         /* Match CDS */
-        if (!cfg->cds_path && (strstr(name, "cds") || strstr(name, "CDS")) && strcmp(name + len - 4, ".fls") == 0) {
+        if (!cfg->cds_path && (!cfg->fls_path || !strstr(cfg->fls_path, name)) && (strstr(name, "cds") || strstr(name, "CDS")) && strcmp(name + len - 4, ".fls") == 0) {
             if (snprintf(auto_cds, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_cds, R_OK) == 0) {
                 cfg->cds_path = auto_cds;
                 printf("[*] Auto-detected Customer Data (CDS): %s\n", cfg->cds_path);
@@ -52,7 +52,7 @@ static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_bsy, ch
         }
 
         /* Match CSC / DFFS */
-        if (!cfg->skip_csc && !cfg->dffs_path && (strstr(name, "csc") || strstr(name, "CSC") || (len >= 5 && strcmp(name + len - 5, ".dffs") == 0))) {
+        if (!cfg->skip_csc && !cfg->dffs_path && (!cfg->fls_path || !strstr(cfg->fls_path, name)) && (strstr(name, "csc") || strstr(name, "CSC") || (len >= 5 && strcmp(name + len - 5, ".dffs") == 0))) {
             if (snprintf(auto_dffs, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_dffs, R_OK) == 0) {
                 cfg->dffs_path = auto_dffs;
                 printf("[*] Auto-detected Customization / DFFS (CSC): %s\n", cfg->dffs_path);
@@ -105,6 +105,8 @@ static void print_usage(const char *prog) {
     printf("  --cds <file.fls>        Customer Data System (_CDS.fls)\n");
     printf("  --dffs <file.dffs>      Data Flash File System (.dffs)\n");
     printf("  --skip-csc              Skip CSC/DFFS flash (boot target OS directly)\n");
+    printf("  --no-auto               Disable automatic detection of companion firmware files\n");
+    printf("  --force-auto            Force auto-detection even when specific target files are provided\n");
     printf("  -b, --baud <rate>       Baud rate (default: 921600)\n");
     printf("  --erase-all             Erase whole non-protected flash before writing\n");
     printf("  --force-dangerous-erase Allow erasing/writing protected calibration & metadata blocks (978..1023)\n");
@@ -311,6 +313,10 @@ int main(int argc, char **argv) {
             {"erase-all", no_argument,       0, 1006},
             {"force-dangerous-erase", no_argument, 0, 1008},
             {"skip-csc",  no_argument,       0, 1007},
+            {"no-auto",   no_argument,       0, 1013},
+            {"no-autodetect", no_argument,   0, 1013},
+            {"auto",      no_argument,       0, 1014},
+            {"force-auto", no_argument,      0, 1014},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -332,6 +338,8 @@ int main(int argc, char **argv) {
                 case 1006: cfg.erase_all = true; break;
                 case 1007: cfg.skip_csc = true; break;
                 case 1008: cfg.force_dangerous_erase = true; break;
+                case 1013: cfg.no_auto = true; break;
+                case 1014: cfg.force_auto = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;
@@ -346,7 +354,18 @@ int main(int argc, char **argv) {
         char auto_bsy[1024] = {0};
         char auto_cds[1024] = {0};
         char auto_dffs[1024] = {0};
-        auto_detect_firmware_files(&cfg, auto_bsy, auto_cds, auto_dffs, sizeof(auto_bsy));
+
+        /* Disable auto-detection if user explicitly passed target firmware files,
+         * or if --no-auto was requested, unless explicitly overridden by --force-auto */
+        bool has_explicit_targets = (cfg.fls_path != NULL || cfg.bsy_path != NULL ||
+                                     cfg.code_path != NULL || cfg.csc_path != NULL ||
+                                     cfg.cds_path != NULL || cfg.dffs_path != NULL);
+
+        if (!cfg.no_auto && (!has_explicit_targets || cfg.force_auto)) {
+            auto_detect_firmware_files(&cfg, auto_bsy, auto_cds, auto_dffs, sizeof(auto_bsy));
+        } else if (has_explicit_targets && !cfg.force_auto) {
+            printf("[*] Specific firmware target(s) specified; auto-detection of companion files disabled.\n");
+        }
 
         cfg.is_usb = (strcmp(port, "usb") == 0);
 
