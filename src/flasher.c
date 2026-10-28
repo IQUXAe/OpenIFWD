@@ -1922,3 +1922,33 @@ int flasher_flash(flasher_session_t *s) {
 
     return 0;
 }
+
+void flasher_hexdump(const uint8_t *data, size_t len, size_t max_lines) {
+    if (!data || len == 0) return;
+    size_t lines = 0;
+    for (size_t i = 0; i < len; i += 16) {
+        if (max_lines > 0 && lines >= max_lines) {
+            printf("... (%zu bytes omitted, use -a / --all / --full or --lines %zu to display full page)\n",
+                   len - i, (len + 15) / 16);
+            break;
+        }
+        printf("%08zx  ", i);
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < len) {
+                printf("%02x ", data[i + j]);
+            } else {
+                printf("   ");
+            }
+            if (j == 7) {
+                printf(" ");
+            }
+        }
+        printf(" |");
+        for (size_t j = 0; j < 16 && (i + j) < len; j++) {
+            uint8_t c = data[i + j];
+            printf("%c", (c >= 32 && c <= 126) ? c : '.');
+        }
+        printf("|\n");
+        lines++;
+    }
+}

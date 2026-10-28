@@ -162,6 +162,7 @@ int flasher_ofls_erase(flasher_session_t *s, uint32_t block, uint32_t count);
 int flasher_ofls_write_page(flasher_session_t *s, uint32_t block, uint32_t page, const uint8_t *data, size_t len);
 int flasher_ofls_read_page(flasher_session_t *s, uint32_t block, uint32_t page, uint8_t *out_data, size_t len);
 int flasher_ofls_reset(flasher_session_t *s);
+void flasher_hexdump(const uint8_t *data, size_t len, size_t max_lines);
 
 #ifdef __cplusplus
 }

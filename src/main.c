@@ -89,13 +89,17 @@ static void print_usage(const char *prog) {
     printf("  flasher-boot -p <port>            Bootstrap & start Open Flasher agent in SDRAM\n");
     printf("  flasher-ping -p <port>            Ping Open Flasher agent\n");
     printf("  flasher-id   -p <port>            Query OneNAND Manufacturer and Device ID\n");
-    printf("  flasher-read -p <port> -b <block> --page <page> -o <file> Read 2048-byte OneNAND page\n");
+    printf("  flasher-read -p <port> -b <block> --page <page> [-o <file>] [-x] [--lines N] [--all]\n");
+    printf("                                    Read 2048-byte OneNAND page (hexdump or save to file)\n");
     printf("  flasher-erase -p <port> -b <block> [-c <count>] Erase OneNAND block(s)\n");
     printf("  flasher-write -p <port> -b <block> --page <page> -i <file> Write 2048-byte OneNAND page\n");
     printf("  flasher-reset -p <port>           Reboot phone via Open Flasher agent\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
     printf("  -o, --out, --output <file> Output file for dumps / page read\n");
+    printf("  -x, --hex               Display hex dump of read page in console (hexdump -C format)\n");
+    printf("  -l, --lines <num>       Number of 16-byte hex dump lines to display (default: 8 = 128 bytes)\n");
+    printf("  -a, --all, --full       Display full 2048-byte page hex dump (all 128 lines)\n");
     printf("  -i, --in, --input <file> Input file for page write\n");
     printf("  -b, --block, --start-block <num> Starting block for NAND operations (0..1023)\n");
     printf("  -c, --count, --block-count <num> Number of blocks to dump / erase (default: 1)\n");
@@ -127,6 +131,7 @@ static void print_usage(const char *prog) {
     printf("  %s flash -p usb --code code.bin --csc csc.bin\n", prog);
     printf("  %s flasher-boot -p usb\n", prog);
     printf("  %s flasher-id -p usb\n", prog);
+    printf("  %s flasher-read -p usb -b 2 --page 0 --hex\n", prog);
     printf("  %s flasher-read -p usb -b 0 --page 0 -o block0_page0.bin\n", prog);
     printf("  %s flasher-erase -p usb -b 10 -c 1\n", prog);
     printf("  %s flasher-write -p usb -b 10 --page 0 -i custom_payload.bin\n", prog);
@@ -841,6 +846,9 @@ int main(int argc, char **argv) {
         uint32_t block = 0;
         uint32_t page = 0;
         const char *out_path = NULL;
+        bool hex_mode = false;
+        bool full_page = false;
+        size_t max_lines = 8; /* Default: 8 lines = 128 bytes */
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.baudrate = 921600;
@@ -850,6 +858,10 @@ int main(int argc, char **argv) {
             {"block",     required_argument, 0, 'b'},
             {"page",      required_argument, 0, 'P'},
             {"out",       required_argument, 0, 'o'},
+            {"hex",       no_argument,       0, 'x'},
+            {"lines",     required_argument, 0, 'l'},
+            {"all",       no_argument,       0, 'a'},
+            {"full",      no_argument,       0, 'a'},
             {"psi",       required_argument, 0, 1001},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
@@ -858,7 +870,7 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "d:b:P:p:o:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "d:b:P:p:o:l:n:xavh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'd': port = optarg; break;
                 case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
@@ -871,6 +883,17 @@ int main(int argc, char **argv) {
                     }
                     break;
                 case 'o': out_path = optarg; break;
+                case 'x': hex_mode = true; break;
+                case 'l':
+                case 'n':
+                    max_lines = (size_t)strtoul(optarg, NULL, 0);
+                    hex_mode = true;
+                    break;
+                case 'a':
+                    full_page = true;
+                    hex_mode = true;
+                    max_lines = 0;
+                    break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
@@ -878,9 +901,9 @@ int main(int argc, char **argv) {
             }
         }
 
+        /* If no output file was specified, default to hex dump mode in console */
         if (!out_path) {
-            fprintf(stderr, "[-] Error: Output file path is required (-o <file>)\n");
-            return 1;
+            hex_mode = true;
         }
 
         transport_t *trans = NULL;
@@ -890,14 +913,19 @@ int main(int argc, char **argv) {
         uint8_t page_buf[2048];
         int res = flasher_ofls_read_page(session, block, page, page_buf, 2048);
         if (res == 0) {
-            FILE *f = fopen(out_path, "wb");
-            if (f) {
-                fwrite(page_buf, 1, 2048, f);
-                fclose(f);
-                printf("[+] Saved 2048 bytes of Block %u, Page %u to %s\n", block, page, out_path);
+            if (out_path && !hex_mode) {
+                FILE *f = fopen(out_path, "wb");
+                if (f) {
+                    fwrite(page_buf, 1, 2048, f);
+                    fclose(f);
+                    printf("[+] Saved 2048 bytes of Block %u, Page %u to %s\n", block, page, out_path);
+                } else {
+                    fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
+                    res = 1;
+                }
             } else {
-                fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
-                res = 1;
+                printf("[*] OneNAND Block %u, Page %u (2048 bytes):\n", block, page);
+                flasher_hexdump(page_buf, 2048, full_page ? 0 : max_lines);
             }
         }
 

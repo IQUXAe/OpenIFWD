@@ -307,11 +307,27 @@ static void test_nvram_safety(void) {
     printf("[TEST] NVRAM memory safety and dump geometry PASSED!\n");
 }
 
+static void test_flasher_hexdump(void) {
+    printf("[TEST] Testing flasher_hexdump output formatting and boundary handling...\n");
+    /* Null and 0-length checks */
+    flasher_hexdump(NULL, 0, 0);
+    flasher_hexdump(NULL, 100, 5);
+
+    /* Verify with dummy data */
+    uint8_t dummy[64];
+    for (size_t i = 0; i < sizeof(dummy); i++) {
+        dummy[i] = (uint8_t)(i + 32); /* printable ascii characters */
+    }
+    flasher_hexdump(dummy, sizeof(dummy), 2);
+    printf("[TEST] flasher_hexdump PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running OpenIFWD Unit Tests ===\n");
     test_protocol_packets();
     test_open_psi();
     test_nvram_safety();
+    test_flasher_hexdump();
 
     const char *sample = (argc >= 2) ? argv[1] : "flashtools/FlashTool_E2_OD/catfish3g.fls";
     test_fls_parsing(sample);
