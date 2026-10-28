@@ -158,18 +158,8 @@ static uint8_t *load_custom_psi(const char *psi_path, size_t *out_size, uint8_t 
             size_t raw_size = 0;
             const uint8_t *raw_data = NULL;
             if (chunk) {
-                raw_data = fls_get_chunk_payload(pf, chunk, &raw_size);
-                if (raw_data && raw_size > 20) {
-                    uint32_t sub_len = *(const uint32_t *)(raw_data + 8);
-                    if (sub_len > 0 && sub_len <= raw_size - 20 && sub_len <= 0xFFFF) {
-                        allocated_psi = (uint8_t *)malloc(sub_len);
-                        if (allocated_psi) {
-                            memcpy(allocated_psi, raw_data + 20, sub_len);
-                            psi_size = sub_len;
-                        }
-                    }
-                }
-                if (!allocated_psi && raw_data && raw_size <= 0xFFFF) {
+                raw_data = fls_get_image_data(pf, chunk, &raw_size);
+                if (raw_data && raw_size > 0 && raw_size <= 0xFFFF) {
                     allocated_psi = (uint8_t *)malloc(raw_size);
                     if (allocated_psi) {
                         memcpy(allocated_psi, raw_data, raw_size);
@@ -338,15 +328,8 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
         const uint8_t *raw_data = NULL;
 
         if (chunk) {
-            raw_data = fls_get_chunk_payload(psi_fls, chunk, &raw_size);
-            if (raw_data && raw_size > 20) {
-                uint32_t sub_len = *(const uint32_t *)(raw_data + 8);
-                if (sub_len > 0 && sub_len <= raw_size - 20 && sub_len <= 0xFFFF) {
-                    psi_data = raw_data + 20;
-                    psi_size = (size_t)sub_len;
-                }
-            }
-            if (!psi_data && raw_data && raw_size <= 0xFFFF) {
+            raw_data = fls_get_image_data(psi_fls, chunk, &raw_size);
+            if (raw_data && raw_size > 0 && raw_size <= 0xFFFF) {
                 psi_data = raw_data;
                 psi_size = raw_size;
             }
@@ -1765,21 +1748,9 @@ int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
     uint32_t total_written_blocks = 0;
 
     for (size_t i = 0; i < n_chunks; i++) {
-        size_t raw_sz = 0;
-        const uint8_t *raw_data = fls_get_chunk_payload(fls, chunks[i], &raw_sz);
-        if (!raw_data || raw_sz == 0) continue;
-
-        /* Skip FLS subheader (28 bytes) if present */
-        const uint8_t *payload = raw_data;
-        size_t payload_len = raw_sz;
-
-        if (raw_sz > 28 && chunks[i]->tag == FLS_TAG_IMAGE_DATA) {
-            uint32_t magic_probe = *(const uint32_t *)(raw_data + 28);
-            if ((magic_probe & 0xFF000000) == 0xEA000000 || (magic_probe & 0x0000FFFF) == 0x696C) {
-                payload = raw_data + 28;
-                payload_len = raw_sz - 28;
-            }
-        }
+        size_t payload_len = 0;
+        const uint8_t *payload = fls_get_image_data(fls, chunks[i], &payload_len);
+        if (!payload || payload_len == 0) continue;
 
         uint32_t blocks_needed = (uint32_t)((payload_len + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
         if (total_written_blocks + blocks_needed > max_blocks) {
@@ -1904,7 +1875,15 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* D. BSY section FLS (--bsy) */
+    /* D. Dedicated SLB section FLS (--slb) -> Blocks 2..9 */
+    if (s->config.slb_path && (!s->config.fls_path || strcmp(s->config.slb_path, s->config.fls_path) != 0)) {
+        if (flasher_flash_fls_container(s, s->config.slb_path) != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* E. BSY section FLS (--bsy) */
     if (s->config.bsy_path && (!s->config.fls_path || strcmp(s->config.bsy_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.bsy_path) != 0) {
             return -1;

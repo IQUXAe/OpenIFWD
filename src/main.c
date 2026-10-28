@@ -14,7 +14,7 @@
 #include <dirent.h>
 #include <errno.h>
 
-static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_bsy, char *auto_cds, char *auto_dffs, size_t buf_sz) {
+static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_slb, char *auto_bsy, char *auto_cds, char *auto_dffs, size_t buf_sz) {
     if (!cfg || !cfg->psi_path) return;
 
     char dir[512];
@@ -34,6 +34,14 @@ static void auto_detect_firmware_files(flasher_config_t *cfg, char *auto_bsy, ch
         const char *name = entry->d_name;
         size_t len = strlen(name);
         if (len < 4) continue;
+
+        /* Match SLB */
+        if (!cfg->slb_path && (!cfg->fls_path || !strstr(cfg->fls_path, name)) && (strstr(name, "slb") || strstr(name, "SLB")) && strcmp(name + len - 4, ".fls") == 0) {
+            if (snprintf(auto_slb, buf_sz, "%s/%s", dir, name) < (int)buf_sz && access(auto_slb, R_OK) == 0) {
+                cfg->slb_path = auto_slb;
+                printf("[*] Auto-detected Second Level Bootloader (SLB): %s\n", cfg->slb_path);
+            }
+        }
 
         /* Match BSY */
         if (!cfg->bsy_path && (!cfg->fls_path || !strstr(cfg->fls_path, name)) && (strstr(name, "bsy") || strstr(name, "BSY")) && strcmp(name + len - 4, ".fls") == 0) {
@@ -101,6 +109,7 @@ static void print_usage(const char *prog) {
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
     printf("  --psi <file.fls/bin>    Vendor PSI Stage 1 container (.fls) or raw binary (auto-detected if omitted)\n");
+    printf("  --slb <file.fls>        Second Level Bootloader (_slb.fls, Block 2..9)\n");
     printf("  --bsy <file.fls>        Baseband system code (_BSY.fls)\n");
     printf("  --cds <file.fls>        Customer Data System (_CDS.fls)\n");
     printf("  --dffs <file.dffs>      Data Flash File System (.dffs)\n");
@@ -304,6 +313,7 @@ int main(int argc, char **argv) {
             {"port",      required_argument, 0, 'p'},
             {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
+            {"slb",       required_argument, 0, 1002},
             {"fls",       required_argument, 0, 1010},
             {"code",      required_argument, 0, 1011},
             {"csc",       required_argument, 0, 1012},
@@ -329,6 +339,7 @@ int main(int argc, char **argv) {
                 case 'p': port = optarg; break;
                 case 'b': cfg.baudrate = (uint32_t)atoi(optarg); break;
                 case 1001: cfg.psi_path = optarg; break;
+                case 1002: cfg.slb_path = optarg; break;
                 case 1010: cfg.fls_path = optarg; break;
                 case 1011: cfg.code_path = optarg; break;
                 case 1012: cfg.csc_path = optarg; break;
@@ -351,18 +362,20 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        char auto_slb[1024] = {0};
         char auto_bsy[1024] = {0};
         char auto_cds[1024] = {0};
         char auto_dffs[1024] = {0};
 
         /* Disable auto-detection if user explicitly passed target firmware files,
          * or if --no-auto was requested, unless explicitly overridden by --force-auto */
-        bool has_explicit_targets = (cfg.fls_path != NULL || cfg.bsy_path != NULL ||
-                                     cfg.code_path != NULL || cfg.csc_path != NULL ||
-                                     cfg.cds_path != NULL || cfg.dffs_path != NULL);
+        bool has_explicit_targets = (cfg.fls_path != NULL || cfg.slb_path != NULL ||
+                                     cfg.bsy_path != NULL || cfg.code_path != NULL ||
+                                     cfg.csc_path != NULL || cfg.cds_path != NULL ||
+                                     cfg.dffs_path != NULL);
 
         if (!cfg.no_auto && (!has_explicit_targets || cfg.force_auto)) {
-            auto_detect_firmware_files(&cfg, auto_bsy, auto_cds, auto_dffs, sizeof(auto_bsy));
+            auto_detect_firmware_files(&cfg, auto_slb, auto_bsy, auto_cds, auto_dffs, sizeof(auto_bsy));
         } else if (has_explicit_targets && !cfg.force_auto) {
             printf("[*] Specific firmware target(s) specified; auto-detection of companion files disabled.\n");
         }

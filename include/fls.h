@@ -52,6 +52,17 @@ typedef struct {
     char     filename[128];   /* Name or relative path of component */
 } fls_toc_entry_t;
 
+/* 28-byte subheader present in FLS Tag 12 (FLS_TAG_IMAGE_DATA) chunks */
+typedef struct {
+    uint32_t sub_index;      /* Index of sub-image (0, 1, ...) */
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint32_t flags_crc;      /* CRC-16 or flags */
+    uint32_t image_size;     /* Length of pure image data (equals payload_size - 28) */
+    uint32_t load_address;   /* Target memory load address (or 0) */
+    uint32_t file_offset;    /* Absolute file offset to pure image data */
+} fls_image_subhdr_t;
+
 #pragma pack(pop)
 
 /* In-memory representation of a parsed chunk */
@@ -85,6 +96,7 @@ void fls_close(fls_file_t *fls);
 const fls_chunk_info_t *fls_find_chunk(const fls_file_t *fls, uint32_t tag);
 size_t fls_find_all_chunks(const fls_file_t *fls, uint32_t tag, const fls_chunk_info_t **out_chunks, size_t max_chunks);
 const uint8_t *fls_get_chunk_payload(const fls_file_t *fls, const fls_chunk_info_t *chunk, size_t *out_size);
+const uint8_t *fls_get_image_data(const fls_file_t *fls, const fls_chunk_info_t *chunk, size_t *out_size);
 int fls_get_sec_cfg_entries(const fls_file_t *fls, fls_sec_cfg_entry_t *out_entries, size_t max_entries, size_t *out_count);
 const char *fls_tag_name(uint32_t tag);
 

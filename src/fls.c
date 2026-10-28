@@ -175,6 +175,37 @@ const uint8_t *fls_get_chunk_payload(const fls_file_t *fls, const fls_chunk_info
     return fls->raw_data + chunk->payload_off;
 }
 
+const uint8_t *fls_get_image_data(const fls_file_t *fls, const fls_chunk_info_t *chunk, size_t *out_size) {
+    if (!fls || !chunk) return NULL;
+    size_t raw_sz = 0;
+    const uint8_t *raw = fls_get_chunk_payload(fls, chunk, &raw_sz);
+    if (!raw || raw_sz == 0) return NULL;
+
+    if (chunk->tag == FLS_TAG_IMAGE_DATA) {
+        if (raw_sz > sizeof(fls_image_subhdr_t)) {
+            const fls_image_subhdr_t *sub = (const fls_image_subhdr_t *)raw;
+            if (sub->image_size > 0 && sub->image_size <= raw_sz - sizeof(fls_image_subhdr_t)) {
+                if (out_size) *out_size = (size_t)sub->image_size;
+                return raw + sizeof(fls_image_subhdr_t);
+            }
+            /* Fallback for standard 28-byte subheader */
+            if (out_size) *out_size = raw_sz - sizeof(fls_image_subhdr_t);
+            return raw + sizeof(fls_image_subhdr_t);
+        }
+    } else if (chunk->tag == FLS_TAG_RPSI) {
+        if (raw_sz > 20) {
+            uint32_t sub_len = *(const uint32_t *)(raw + 8);
+            if (sub_len > 0 && sub_len <= raw_sz - 20) {
+                if (out_size) *out_size = (size_t)sub_len;
+                return raw + 20;
+            }
+        }
+    }
+
+    if (out_size) *out_size = raw_sz;
+    return raw;
+}
+
 int fls_get_sec_cfg_entries(const fls_file_t *fls, fls_sec_cfg_entry_t *out_entries, size_t max_entries, size_t *out_count) {
     if (!fls || !out_entries || max_entries == 0) return -1;
     const fls_chunk_info_t *sec_chunk = fls_find_chunk(fls, FLS_TAG_SEC_CFG);
@@ -253,7 +284,10 @@ int fls_unpack(const fls_file_t *fls, const char *out_dir) {
             continue;
         }
 
-        size_t written = fwrite(fls->raw_data + c->payload_off, 1, c->payload_size, f);
+        size_t pure_sz = 0;
+        const uint8_t *pure_data = fls_get_image_data(fls, c, &pure_sz);
+        size_t written = fwrite(pure_data ? pure_data : (fls->raw_data + c->payload_off), 1,
+                                pure_data ? pure_sz : c->payload_size, f);
         fclose(f);
         printf("Extracted: %s (%zu bytes)\n", path, written);
     }

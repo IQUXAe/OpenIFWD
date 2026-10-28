@@ -243,7 +243,7 @@ static void *worker_flash_thread(void *arg) {
                 const fls_chunk_info_t *c = fls_find_chunk(bsy, FLS_TAG_IMAGE_DATA);
                 if (c) {
                     size_t sz = 0;
-                    const uint8_t *d = fls_get_chunk_payload(bsy, c, &sz);
+                    const uint8_t *d = fls_get_image_data(bsy, c, &sz);
                     if (d && sz > 0) {
                         payload_buf = (uint8_t *)malloc(sz);
                         if (payload_buf) {
@@ -411,7 +411,7 @@ static void *worker_ramboot_thread(void *arg) {
         const fls_chunk_info_t *c = fls_find_chunk(fls, FLS_TAG_IMAGE_DATA);
         if (c) {
             size_t sz = 0;
-            const uint8_t *d = fls_get_chunk_payload(fls, c, &sz);
+            const uint8_t *d = fls_get_image_data(fls, c, &sz);
             if (d && sz > 0) {
                 payload_buf = (uint8_t *)malloc(sz);
                 if (payload_buf) {

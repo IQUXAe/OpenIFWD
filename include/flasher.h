@@ -14,6 +14,7 @@ extern "C" {
 
 typedef struct {
     const char *psi_path;     /* Optional custom PSI (default: built-in Open Rust PSI) */
+    const char *slb_path;     /* Second Level Bootloader (_slb.fls / Block 2..9) */
     const char *bsy_path;     /* Baseband system code (_BSY.fls) */
     const char *cds_path;     /* Customer Data System (_CDS.fls) */
     const char *dffs_path;    /* Data Flash File System (.dffs / CSC) */

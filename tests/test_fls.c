@@ -186,6 +186,95 @@ static void test_flash_sections(void) {
     printf("[TEST] Stock firmware components PASSED!\n");
 }
 
+static void test_fls_payload_extraction(void) {
+    printf("[TEST] Testing pure payload extraction (stripping 28-byte FLS subheader)...\n");
+
+    /* 1. Test Second Level Bootloader (SLB - Block 2) */
+    fls_file_t *slb = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_slb.fls");
+    if (slb) {
+        const fls_chunk_info_t *c = fls_find_chunk(slb, FLS_TAG_IMAGE_DATA);
+        assert(c != NULL);
+        assert(c->payload_size == 283728);
+
+        size_t img_sz = 0;
+        const uint8_t *img = fls_get_image_data(slb, c, &img_sz);
+        assert(img != NULL);
+        assert(img_sz == 283700); /* 283728 - 28 bytes header */
+
+        /* Ensure 28-byte FLS subheader metadata was stripped */
+        uint32_t first_word = *(const uint32_t *)img;
+        assert(first_word == 0x00000000); /* Vector/BSS space */
+        uint32_t sub_tag = *(const uint32_t *)(img + 12);
+        assert(sub_tag != 0x00002D72); /* Must NOT be the FLS subheader CRC/tag */
+
+        /* Verify executable ARM code at offset 0x400 (Target execution address 0x60000400) */
+        uint32_t arm_entry_opcode = *(const uint32_t *)(img + 0x400);
+        assert(arm_entry_opcode == 0xEB000261); /* bl reset/init */
+        uint32_t arm_mrs = *(const uint32_t *)(img + 0x404);
+        assert(arm_mrs == 0xE10F0000); /* mrs r0, CPSR */
+
+        printf("[+] SLB (Block 2): 28-byte subheader stripped. Size %zu bytes, ARM entry at 0x400 validated: 0x%08X (bl)\n",
+               img_sz, arm_entry_opcode);
+        fls_close(slb);
+    }
+
+    /* 2. Test Baseband System (BSY - Block 10) */
+    fls_file_t *bsy = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_BSY.fls");
+    if (bsy) {
+        const fls_chunk_info_t *chunks[4];
+        size_t n = fls_find_all_chunks(bsy, FLS_TAG_IMAGE_DATA, chunks, 4);
+        assert(n == 2);
+
+        /* Chunk 0: Boot core & vector header */
+        size_t sz0 = 0;
+        const uint8_t *d0 = fls_get_image_data(bsy, chunks[0], &sz0);
+        assert(d0 != NULL);
+        assert(sz0 == 6525748);
+        uint32_t branch_op = *(const uint32_t *)d0;
+        assert(branch_op == 0xEA00007E); /* b reset_handler */
+        assert(memcmp(d0 + 4, "liHU", 4) == 0);
+
+        /* Chunk 1: Main system code */
+        size_t sz1 = 0;
+        const uint8_t *d1 = fls_get_image_data(bsy, chunks[1], &sz1);
+        assert(d1 != NULL);
+        assert(sz1 == 30082376);
+        uint16_t thumb_push = *(const uint16_t *)d1;
+        assert(thumb_push == 0xB4FE); /* push {r1..r7, lr} */
+
+        printf("[+] BSY (Block 10): 28-byte subheader stripped. Chunk 0 branch 0x%08X ('liHU'), Chunk 1 Thumb 0x%04X validated\n",
+               branch_op, thumb_push);
+        fls_close(bsy);
+    }
+
+    /* 3. Test CDS & CSC/DFFS */
+    fls_file_t *cds = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_CDS.fls");
+    if (cds) {
+        const fls_chunk_info_t *c = fls_find_chunk(cds, FLS_TAG_IMAGE_DATA);
+        assert(c != NULL);
+        size_t sz = 0;
+        const uint8_t *d = fls_get_image_data(cds, c, &sz);
+        assert(d != NULL && sz == 346452);
+        assert(memcmp(d + 12, "CJKT", 4) == 0);
+        printf("[+] CDS: 28-byte subheader stripped. Size %zu bytes, signature 'CJKT' validated\n", sz);
+        fls_close(cds);
+    }
+
+    fls_file_t *csc = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222OXEMJ1_CSC.dffs");
+    if (csc) {
+        const fls_chunk_info_t *c = fls_find_chunk(csc, FLS_TAG_IMAGE_DATA);
+        assert(c != NULL);
+        size_t sz = 0;
+        const uint8_t *d = fls_get_image_data(csc, c, &sz);
+        assert(d != NULL && sz == 49514884);
+        assert(memcmp(d + 12, "IDF@", 4) == 0);
+        printf("[+] CSC/DFFS: 28-byte subheader stripped. Size %zu bytes, signature 'IDF@' validated\n", sz);
+        fls_close(csc);
+    }
+
+    printf("[TEST] Pure payload extraction test PASSED!\n");
+}
+
 static void test_nvram_safety(void) {
     printf("[TEST] Testing NVRAM memory safety protection (is_flash_range_safe)...\n");
 
@@ -231,6 +320,7 @@ int main(int argc, char **argv) {
     test_fls_parsing("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_psi.fls");
     test_firmware_structure();
     test_flash_sections();
+    test_fls_payload_extraction();
 
     printf("=== All Tests Passed Successfully! ===\n");
     return 0;
