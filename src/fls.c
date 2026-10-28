@@ -206,6 +206,13 @@ const uint8_t *fls_get_image_data(const fls_file_t *fls, const fls_chunk_info_t 
     return raw;
 }
 
+const uint8_t *fls_get_sec_cfg(const fls_file_t *fls, size_t *out_size) {
+    if (!fls) return NULL;
+    const fls_chunk_info_t *sec_chunk = fls_find_chunk(fls, FLS_TAG_SEC_CFG);
+    if (!sec_chunk) return NULL;
+    return fls_get_chunk_payload(fls, sec_chunk, out_size);
+}
+
 int fls_get_sec_cfg_entries(const fls_file_t *fls, fls_sec_cfg_entry_t *out_entries, size_t max_entries, size_t *out_count) {
     if (!fls || !out_entries || max_entries == 0) return -1;
     const fls_chunk_info_t *sec_chunk = fls_find_chunk(fls, FLS_TAG_SEC_CFG);

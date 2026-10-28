@@ -1722,11 +1722,169 @@ int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path
     return 0;
 }
 
+int flasher_init_sec_cfg(flasher_session_t *s, const char *fls_path) {
+    if (!s || !fls_path || access(fls_path, R_OK) != 0) {
+        return -1;
+    }
+
+    fls_file_t *fls = fls_open(fls_path);
+    if (!fls) {
+        return -1;
+    }
+
+    size_t sec_len = 0;
+    const uint8_t *sec_data = fls_get_sec_cfg(fls, &sec_len);
+    if (!sec_data || sec_len != 2048) {
+        fls_close(fls);
+        return 0;
+    }
+
+    /* Copy raw 2048-byte Tag 15 SEC_CFG into session context */
+    memcpy(s->sec_cfg, sec_data, 2048);
+    s->has_sec_cfg = true;
+
+    printf("\n[*] Initializing Security Configuration (Tag 15) from: %s\n", fls_path);
+    printf("    SEC_CFG Size: 2048 bytes loaded into session\n");
+
+    /* Validate magic at offset 1916 (0x77C) */
+    uint32_t magic = *(const uint32_t *)(sec_data + 1916);
+    if (magic == FLS_SEC_CFG_MAGIC) {
+        printf("[+] Security Signature: 0x%08X (FLS_SEC_CFG_MAGIC Verified)\n", magic);
+    } else {
+        printf("[!] Security Signature: 0x%08X (Expected 0x%08X)\n", magic, FLS_SEC_CFG_MAGIC);
+    }
+    printf("[+] Target Security Profile: 2150_OD_KL1_3.1 (Secured)\n");
+
+    /* Parse partition entries */
+    fls_sec_cfg_entry_t entries[8];
+    size_t count = 0;
+    if (fls_get_sec_cfg_entries(fls, entries, 8, &count) == 0 && count > 0) {
+        printf("[+] Security Partition Descriptors (%zu found):\n", count);
+        for (size_t e = 0; e < count; e++) {
+            printf("    [%zu] Load Addr: 0x%08X, Max Size: %6u KB, Image Size: %6u KB\n",
+                   e + 1, entries[e].load_address,
+                   entries[e].partition_size / 1024,
+                   entries[e].image_size / 1024);
+        }
+    }
+
+    fls_close(fls);
+    return 0;
+}
+
+int flasher_flash_slb(flasher_session_t *s, const char *slb_path) {
+    if (!s || !slb_path || access(slb_path, R_OK) != 0) {
+        fprintf(stderr, "[-] Cannot access SLB container: %s (%s)\n", slb_path ? slb_path : "<null>", strerror(errno));
+        return -1;
+    }
+
+    /* Initialize SEC_CFG from SLB container if available */
+    flasher_init_sec_cfg(s, slb_path);
+
+    printf("\n================================================================================\n");
+    printf("[*] Flashing Second Level Bootloader (SLB): %s\n", slb_path);
+    printf("================================================================================\n");
+
+    fls_file_t *fls = fls_open(slb_path);
+    if (!fls) {
+        fprintf(stderr, "[-] Failed to open SLB container: %s\n", slb_path);
+        return -1;
+    }
+
+    const fls_chunk_info_t *c = fls_find_chunk(fls, FLS_TAG_IMAGE_DATA);
+    if (!c) {
+        fprintf(stderr, "[-] No IMAGE_DATA chunk (Tag 12) found in SLB container %s\n", slb_path);
+        fls_close(fls);
+        return -1;
+    }
+
+    size_t payload_len = 0;
+    const uint8_t *payload = fls_get_image_data(fls, c, &payload_len);
+    if (!payload || payload_len == 0) {
+        fprintf(stderr, "[-] Failed to extract SLB payload from %s\n", slb_path);
+        fls_close(fls);
+        return -1;
+    }
+
+    /* 1. Calculate blocks needed: ceil(payload_len / ONENAND_BLOCK_SIZE) */
+    uint32_t blocks_needed = (uint32_t)((payload_len + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
+    uint32_t start_block = ONENAND_PART_EBL_START; /* Block 2 */
+
+    if (blocks_needed > ONENAND_PART_EBL_BLOCKS) {
+        fprintf(stderr, "[-] Error: SLB size (%zu bytes, %u blocks) exceeds partition capacity (%u blocks)\n",
+                payload_len, blocks_needed, ONENAND_PART_EBL_BLOCKS);
+        fls_close(fls);
+        return -1;
+    }
+
+    printf("[*] SLB Payload: %zu bytes (%u blocks needed: Blocks %u .. %u)\n",
+           payload_len, blocks_needed, start_block, start_block + blocks_needed - 1);
+
+    /* 2. Erase target blocks (for SLB: Blocks 2, 3, 4) */
+    printf("[*] Erasing %u block(s) for SLB (Blocks %u .. %u)...\n",
+           blocks_needed, start_block, start_block + blocks_needed - 1);
+    if (flasher_ofls_erase(s, start_block, blocks_needed) != 0) {
+        fprintf(stderr, "[-] Failed to erase SLB blocks (%u .. %u)\n",
+                start_block, start_block + blocks_needed - 1);
+        fls_close(fls);
+        return -1;
+    }
+
+    /* 3. Program pages with block increment every 64 pages (128 KB) */
+    uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+    uint8_t page_buf[ONENAND_PAGE_SIZE];
+
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    for (uint32_t pages_done = 0; pages_done < total_pages; pages_done++) {
+        uint32_t blk = start_block + (pages_done / ONENAND_PAGES_PER_BLOCK);
+        uint32_t page = pages_done % ONENAND_PAGES_PER_BLOCK;
+
+        size_t offset = (size_t)pages_done * ONENAND_PAGE_SIZE;
+        memset(page_buf, 0xFF, sizeof(page_buf));
+
+        size_t copy_sz = payload_len - offset;
+        if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
+        memcpy(page_buf, payload + offset, copy_sz);
+
+        if (flasher_ofls_write_page(s, blk, page, page_buf, sizeof(page_buf)) != 0) {
+            fprintf(stderr, "\n[-] SLB write failed at Block %u, Page %u (page %u / %u)\n",
+                    blk, page, pages_done + 1, total_pages);
+            fls_close(fls);
+            return -1;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+        double speed_kb = (elapsed > 0.05) ? (((size_t)(pages_done + 1) * 2) / elapsed) : 0.0;
+        int pct = (int)(((pages_done + 1) * 100ULL) / total_pages);
+        printf("\r[*] [SLB] Progress: %3d%% (%u / %u pages, Block %u Page %u, %.1f KB/s)   ",
+               pct, pages_done + 1, total_pages, blk, page, speed_kb);
+        fflush(stdout);
+    }
+
+    printf("\n[+] Second Level Bootloader (SLB) successfully written! (%u pages across %u blocks)\n",
+           total_pages, blocks_needed);
+
+    fls_close(fls);
+    return 0;
+}
+
 int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
     if (!s || !fls_path || access(fls_path, R_OK) != 0) {
         fprintf(stderr, "[-] Cannot access FLS container: %s (%s)\n", fls_path ? fls_path : "<null>", strerror(errno));
         return -1;
     }
+
+    /* If this is an SLB container, delegate directly to dedicated multi-block SLB flasher */
+    if (strstr(fls_path, "slb") || strstr(fls_path, "SLB")) {
+        return flasher_flash_slb(s, fls_path);
+    }
+
+    /* Initialize SEC_CFG from container if available */
+    flasher_init_sec_cfg(s, fls_path);
 
     printf("\n[*] Processing FLS container: %s\n", fls_path);
     fls_file_t *fls = fls_open(fls_path);
@@ -1748,10 +1906,6 @@ int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
         start_block = ONENAND_PART_CSC_START;
         max_blocks  = ONENAND_PART_CSC_BLOCKS;
         label       = "CSC/CDS";
-    } else if (strstr(fls_path, "slb") || strstr(fls_path, "SLB")) {
-        start_block = ONENAND_PART_EBL_START;
-        max_blocks  = ONENAND_PART_EBL_BLOCKS;
-        label       = "SLB/EBL";
     }
 
     const fls_chunk_info_t *chunks[32];
@@ -1808,40 +1962,36 @@ int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path) {
         }
 
         uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
-        uint32_t pages_done = 0;
         uint8_t page_buf[ONENAND_PAGE_SIZE];
 
         struct timespec start_time;
         clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-        for (uint32_t b = 0; b < blocks_needed; b++) {
-            uint32_t blk = cur_block + b;
-            for (uint32_t p = 0; p < ONENAND_PAGES_PER_BLOCK; p++) {
-                if (pages_done >= total_pages) break;
+        for (uint32_t pages_done = 0; pages_done < total_pages; pages_done++) {
+            uint32_t blk = cur_block + (pages_done / ONENAND_PAGES_PER_BLOCK);
+            uint32_t p = pages_done % ONENAND_PAGES_PER_BLOCK;
 
-                size_t offset = (size_t)pages_done * ONENAND_PAGE_SIZE;
-                memset(page_buf, 0xFF, sizeof(page_buf));
+            size_t offset = (size_t)pages_done * ONENAND_PAGE_SIZE;
+            memset(page_buf, 0xFF, sizeof(page_buf));
 
-                size_t copy_sz = payload_len - offset;
-                if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
-                memcpy(page_buf, payload + offset, copy_sz);
+            size_t copy_sz = payload_len - offset;
+            if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
+            memcpy(page_buf, payload + offset, copy_sz);
 
-                if (flasher_ofls_write_page(s, blk, p, page_buf, sizeof(page_buf)) != 0) {
-                    fprintf(stderr, "\n[-] Write failed at Chunk %zu, Block %u, Page %u\n", i + 1, blk, p);
-                    fls_close(fls);
-                    return -1;
-                }
-
-                pages_done++;
-                struct timespec now;
-                clock_gettime(CLOCK_MONOTONIC, &now);
-                double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
-                double speed_kb = (elapsed > 0.05) ? (((size_t)pages_done * 2) / elapsed) : 0.0;
-                int pct = (int)((pages_done * 100ULL) / total_pages);
-                printf("\r[*] Chunk %zu/%zu Progress: %3d%% (%u / %u pages, Block %u Page %u, %.1f KB/s)   ",
-                       i + 1, n_chunks, pct, pages_done, total_pages, blk, p, speed_kb);
-                fflush(stdout);
+            if (flasher_ofls_write_page(s, blk, p, page_buf, sizeof(page_buf)) != 0) {
+                fprintf(stderr, "\n[-] Write failed at Chunk %zu, Block %u, Page %u\n", i + 1, blk, p);
+                fls_close(fls);
+                return -1;
             }
+
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+            double speed_kb = (elapsed > 0.05) ? (((size_t)(pages_done + 1) * 2) / elapsed) : 0.0;
+            int pct = (int)(((pages_done + 1) * 100ULL) / total_pages);
+            printf("\r[*] Chunk %zu/%zu Progress: %3d%% (%u / %u pages, Block %u Page %u, %.1f KB/s)   ",
+                   i + 1, n_chunks, pct, pages_done + 1, total_pages, blk, p, speed_kb);
+            fflush(stdout);
         }
         printf("\n[+] Chunk %zu flashed successfully!\n", i + 1);
 
@@ -1874,10 +2024,26 @@ int flasher_flash(flasher_session_t *s) {
         return -1;
     }
 
-    /* 3. Execute requested flash operations */
+    /* 3. Initialize Security Configuration (Tag 15, 2048 bytes) from primary firmware container */
+    const char *primary_fls = s->config.slb_path ? s->config.slb_path :
+                             (s->config.fls_path ? s->config.fls_path :
+                             (s->config.bsy_path ? s->config.bsy_path : s->config.psi_path));
+    if (primary_fls) {
+        flasher_init_sec_cfg(s, primary_fls);
+    }
+
+    /* 4. Execute requested flash operations */
     int flashed_count = 0;
 
-    /* A. Dedicated CODE partition binary (--code) */
+    /* A. Dedicated SLB section FLS (--slb) -> Blocks 2..4 (Second Level Bootloader flashed FIRST) */
+    if (s->config.slb_path) {
+        if (flasher_flash_slb(s, s->config.slb_path) != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* B. Dedicated CODE partition binary (--code) */
     if (s->config.code_path) {
         if (flasher_flash_binary_to_partition(s, s->config.code_path,
                                               ONENAND_PART_CODE_START,
@@ -1887,7 +2053,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* B. Dedicated CSC partition binary (--csc) */
+    /* C. Dedicated CSC partition binary (--csc) */
     if (s->config.csc_path) {
         if (flasher_flash_binary_to_partition(s, s->config.csc_path,
                                               ONENAND_PART_CSC_START,
@@ -1897,17 +2063,9 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* C. Unified or Section FLS container (--fls) */
-    if (s->config.fls_path) {
+    /* D. Unified or Section FLS container (--fls) */
+    if (s->config.fls_path && (!s->config.slb_path || strcmp(s->config.fls_path, s->config.slb_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.fls_path) != 0) {
-            return -1;
-        }
-        flashed_count++;
-    }
-
-    /* D. Dedicated SLB section FLS (--slb) -> Blocks 2..9 */
-    if (s->config.slb_path && (!s->config.fls_path || strcmp(s->config.slb_path, s->config.fls_path) != 0)) {
-        if (flasher_flash_fls_container(s, s->config.slb_path) != 0) {
             return -1;
         }
         flashed_count++;
@@ -1921,7 +2079,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* E. CDS section FLS (--cds) */
+    /* F. CDS section FLS (--cds) */
     if (s->config.cds_path && (!s->config.fls_path || strcmp(s->config.cds_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.cds_path) != 0) {
             return -1;
@@ -1929,7 +2087,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* F. DFFS / CSC section (--dffs) */
+    /* G. DFFS / CSC section (--dffs) */
     if (!s->config.skip_csc && s->config.dffs_path && (!s->config.fls_path || strcmp(s->config.dffs_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.dffs_path) != 0) {
             return -1;

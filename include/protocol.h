@@ -209,6 +209,9 @@ size_t ifwd_build_packet(uint8_t channel, uint16_t msg_type,
 int ifwd_parse_packet(const uint8_t *buf, size_t len,
                       ifwd_pkt_hdr_t *out_hdr, const uint8_t **out_payload);
 
+size_t protocol_build_ebl_packet(uint16_t msg_type, const void *payload, uint32_t payload_len,
+                                 uint8_t *out_buf, size_t max_buf_len, size_t total_wire_len);
+
 /* ========================================================================= */
 /* OpenIFWD Standard Protocol Definitions (Replaces proprietary EBL)         */
 /* ========================================================================= */

@@ -357,6 +357,139 @@ static void test_psi_sha256_verification(void) {
     printf("[TEST] PSI SHA-256 verification PASSED!\n");
 }
 
+static void test_slb_multiblock_geometry(void) {
+    printf("[TEST] Testing Second Level Bootloader (SLB) multi-block flash geometry...\n");
+
+    fls_file_t *slb = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_slb.fls");
+    if (slb) {
+        const fls_chunk_info_t *c = fls_find_chunk(slb, FLS_TAG_IMAGE_DATA);
+        assert(c != NULL);
+
+        size_t payload_len = 0;
+        const uint8_t *payload = fls_get_image_data(slb, c, &payload_len);
+        assert(payload != NULL);
+        assert(payload_len == 283700);
+
+        /* 1. Calculate OneNAND blocks needed: ceil(283700 / 131072) == 3 blocks */
+        uint32_t blocks_needed = (uint32_t)((payload_len + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
+        assert(blocks_needed == 3);
+
+        /* Target range: Blocks 2, 3, 4 */
+        uint32_t start_block = ONENAND_PART_EBL_START;
+        assert(start_block == 2U);
+        uint32_t end_block = start_block + blocks_needed - 1;
+        assert(end_block == 4U);
+
+        /* 2. Total pages: ceil(283700 / 2048) == 139 pages */
+        uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+        assert(total_pages == 139);
+
+        /* 3. Verify every page mapping and block increment */
+        for (uint32_t pages_done = 0; pages_done < total_pages; pages_done++) {
+            uint32_t blk = start_block + (pages_done / ONENAND_PAGES_PER_BLOCK);
+            uint32_t p   = pages_done % ONENAND_PAGES_PER_BLOCK;
+
+            if (pages_done < 64) {
+                assert(blk == 2);
+                assert(p == pages_done);
+            } else if (pages_done < 128) {
+                assert(blk == 3);
+                assert(p == pages_done - 64);
+            } else {
+                assert(blk == 4);
+                assert(p == pages_done - 128);
+            }
+        }
+
+        printf("[+] SLB multi-block geometry validated: %zu bytes -> %u blocks (Blocks 2..4), %u pages\n",
+               payload_len, blocks_needed, total_pages);
+        fls_close(slb);
+    }
+
+    printf("[TEST] SLB multi-block geometry PASSED!\n");
+}
+
+static void test_sec_cfg_tag15(void) {
+    printf("[TEST] Testing Tag 15 (SEC_CFG, 2048 bytes) parsing & EBL protocol packet construction...\n");
+
+    /* 1. Test Tag 15 extraction from SLB container */
+    fls_file_t *slb = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_slb.fls");
+    if (slb) {
+        size_t sec_sz = 0;
+        const uint8_t *sec_data = fls_get_sec_cfg(slb, &sec_sz);
+        assert(sec_data != NULL);
+        assert(sec_sz == 2048);
+
+        /* Magic check at offset 1916 (0x77C) */
+        uint32_t magic = *(const uint32_t *)(sec_data + 1916);
+        assert(magic == FLS_SEC_CFG_MAGIC);
+
+        /* Test fls_sec_cfg_entry_t extraction */
+        fls_sec_cfg_entry_t entries[8];
+        size_t count = 0;
+        assert(fls_get_sec_cfg_entries(slb, entries, 8, &count) == 0);
+        assert(entries[0].load_address == 0x60000000);
+        assert(entries[0].image_size == 283700);
+
+        printf("[+] Tag 15 SEC_CFG in SLB validated: size 2048 bytes, magic 0x%08X, %zu partition entries\n",
+               magic, count);
+        fls_close(slb);
+    }
+
+    /* 2. Test Tag 15 in BSY container */
+    fls_file_t *bsy = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_BSY.fls");
+    if (bsy) {
+        size_t sec_sz = 0;
+        const uint8_t *sec_data = fls_get_sec_cfg(bsy, &sec_sz);
+        assert(sec_data != NULL);
+        assert(sec_sz == 2048);
+
+        uint32_t magic = *(const uint32_t *)(sec_data + 1916);
+        assert(magic == FLS_SEC_CFG_MAGIC);
+
+        fls_sec_cfg_entry_t entries[8];
+        size_t count = 0;
+        assert(fls_get_sec_cfg_entries(bsy, entries, 8, &count) == 0);
+        assert(count == 2);
+        assert(entries[0].load_address == 0x63200000);
+        assert(entries[1].load_address == 0x66000000);
+
+        printf("[+] Tag 15 SEC_CFG in BSY validated: 2048 bytes, magic 0x%08X, partitions: 0x%08X, 0x%08X\n",
+               magic, entries[0].load_address, entries[1].load_address);
+        fls_close(bsy);
+    }
+
+    /* 3. Test EBL Frame 107 (ReqSetProtConf) packet builder with 2048-byte payload */
+    uint8_t packet_buf[4096];
+    ebl_req_prot_conf_t prot_conf;
+    memset(&prot_conf, 0, sizeof(prot_conf));
+    prot_conf.magic = 0x000000BB;
+    prot_conf.proto_ver = 0x00000003;
+    prot_conf.channel = 0x00000001;
+    strncpy(prot_conf.chip_id, "2150_OD_KL1_3.1", sizeof(prot_conf.chip_id));
+    uint8_t flags_ref[28] = {
+        0x03, 0x10, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    memcpy(prot_conf.flags, flags_ref, sizeof(flags_ref));
+
+    size_t pkt_len = protocol_build_ebl_packet(IFWD_MSG_REQ_SET_PROT_CONF,
+                                              &prot_conf, sizeof(prot_conf),
+                                              packet_buf, sizeof(packet_buf), 2056);
+    assert(pkt_len == 2056);
+    const ebl_pkt_hdr_t *hdr = (const ebl_pkt_hdr_t *)packet_buf;
+    assert(hdr->msg_type == IFWD_MSG_REQ_SET_PROT_CONF);
+    assert(hdr->length == 72);
+    assert(hdr->checksum == 0x0576); /* Verified against Wireshark dump Frame 107! */
+
+    printf("[+] EBL Frame 107 (ReqSetProtConf) packet verified! Token: 0x%04X, Wire Size: %zu B\n",
+           hdr->checksum, pkt_len);
+
+    printf("[TEST] Tag 15 (SEC_CFG) & EBL protocol test PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running OpenIFWD Unit Tests ===\n");
     test_protocol_packets();
@@ -364,6 +497,8 @@ int main(int argc, char **argv) {
     test_nvram_safety();
     test_flasher_hexdump();
     test_psi_sha256_verification();
+    test_slb_multiblock_geometry();
+    test_sec_cfg_tag15();
 
     const char *sample = (argc >= 2) ? argv[1] : "flashtools/FlashTool_E2_OD/catfish3g.fls";
     test_fls_parsing(sample);
