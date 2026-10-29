@@ -409,6 +409,52 @@ static void test_slb_multiblock_geometry(void) {
     printf("[TEST] SLB multi-block geometry PASSED!\n");
 }
 
+static void test_psi_flash_block0_geometry(void) {
+    printf("[TEST] Testing Primary Stage Initializer (psi_flash / Block 0) flash geometry...\n");
+
+    fls_file_t *psi = fls_open("/home/iquxae/Projects/gt-s5222_dev/S5222XXMJ1_OXEMJ1/S5222XXMJ1_psi.fls");
+    if (psi) {
+        const fls_chunk_info_t *c = fls_find_chunk(psi, FLS_TAG_IMAGE_DATA);
+        assert(c != NULL);
+
+        size_t payload_len = 0;
+        const uint8_t *payload = fls_get_image_data(psi, c, &payload_len);
+        assert(payload != NULL);
+        assert(payload_len == 129116);
+
+        /* 1. Target is strictly Block 0 (BSR) */
+        uint32_t target_block = ONENAND_PART_BSR_START;
+        assert(target_block == 0U);
+
+        /* 2. Calculate OneNAND blocks needed: ceil(129116 / 131072) == 1 block */
+        uint32_t blocks_needed = (uint32_t)((payload_len + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
+        assert(blocks_needed == 1U);
+        assert(blocks_needed <= ONENAND_PART_BSR_BLOCKS);
+
+        /* 3. Total pages: ceil(129116 / 2048) == 64 pages */
+        uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+        assert(total_pages == 64U);
+
+        /* 4. Verify all pages target Block 0 */
+        for (uint32_t p = 0; p < total_pages; p++) {
+            uint32_t blk = target_block + (p / ONENAND_PAGES_PER_BLOCK);
+            uint32_t page = p % ONENAND_PAGES_PER_BLOCK;
+            assert(blk == 0);
+            assert(page == p);
+        }
+
+        /* 5. Verify last page (page 63) payload remainder: 129116 - (63 * 2048) = 92 bytes */
+        size_t last_page_payload_bytes = payload_len - (63 * ONENAND_PAGE_SIZE);
+        assert(last_page_payload_bytes == 92);
+
+        printf("[+] PSI (Block 0 / BSR) geometry validated: %zu bytes -> Block 0, %u pages\n",
+               payload_len, total_pages);
+        fls_close(psi);
+    }
+
+    printf("[TEST] PSI (Block 0 / BSR) flash geometry PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running OpenIFWD Unit Tests ===\n");
     test_protocol_packets();
@@ -417,6 +463,7 @@ int main(int argc, char **argv) {
     test_flasher_hexdump();
     test_psi_sha256_verification();
     test_slb_multiblock_geometry();
+    test_psi_flash_block0_geometry();
 
     const char *sample = (argc >= 2) ? argv[1] : "flashtools/FlashTool_E2_OD/catfish3g.fls";
     test_fls_parsing(sample);

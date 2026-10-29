@@ -1722,6 +1722,111 @@ int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path
     return 0;
 }
 
+int flasher_flash_psi(flasher_session_t *s, const char *psi_path) {
+    if (!s || !psi_path || access(psi_path, R_OK) != 0) {
+        fprintf(stderr, "[-] Cannot access PSI container: %s (%s)\n", psi_path ? psi_path : "<null>", strerror(errno));
+        return -1;
+    }
+
+    printf("\n================================================================================\n");
+    printf("[*] Flashing Primary Stage Initializer (PSI / BSR) -> Block 0: %s\n", psi_path);
+    printf("================================================================================\n");
+
+    const uint8_t *payload = NULL;
+    size_t payload_len = 0;
+    uint8_t *raw_buf = NULL;
+    fls_file_t *fls = fls_open(psi_path);
+
+    if (fls) {
+        const fls_chunk_info_t *c = fls_find_chunk(fls, FLS_TAG_IMAGE_DATA);
+        if (c) {
+            payload = fls_get_image_data(fls, c, &payload_len);
+        }
+    }
+
+    /* Fallback: if not an FLS container or no Tag 12, try reading raw binary file */
+    if (!payload || payload_len == 0) {
+        FILE *f = fopen(psi_path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            rewind(f);
+            if (sz > 0 && sz <= (long)ONENAND_BLOCK_SIZE) {
+                raw_buf = (uint8_t *)malloc((size_t)sz);
+                if (raw_buf && fread(raw_buf, 1, (size_t)sz, f) == (size_t)sz) {
+                    payload = raw_buf;
+                    payload_len = (size_t)sz;
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (!payload || payload_len == 0) {
+        fprintf(stderr, "[-] Error: Failed to extract psi_flash payload from %s (no Tag 12 IMAGE_DATA found)\n", psi_path);
+        if (fls) fls_close(fls);
+        if (raw_buf) free(raw_buf);
+        return -1;
+    }
+
+    if (payload_len > ONENAND_BLOCK_SIZE) {
+        fprintf(stderr, "[-] Error: PSI payload size (%zu bytes) exceeds Block 0 capacity (%u bytes)\n",
+                payload_len, ONENAND_BLOCK_SIZE);
+        if (fls) fls_close(fls);
+        if (raw_buf) free(raw_buf);
+        return -1;
+    }
+
+    uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+    printf("[*] PSI Payload: %zu bytes (Targeting Block 0, %u pages)\n", payload_len, total_pages);
+
+    /* 1. Erase Block 0 (ONENAND_PART_BSR_START = 0, count = 1) */
+    printf("[*] Erasing OneNAND Block 0 (BSR)...\n");
+    if (flasher_ofls_erase(s, ONENAND_PART_BSR_START, 1) != 0) {
+        fprintf(stderr, "[-] Failed to erase Block 0\n");
+        if (fls) fls_close(fls);
+        if (raw_buf) free(raw_buf);
+        return -1;
+    }
+
+    /* 2. Program pages in Block 0 with 0xFF padding */
+    uint8_t page_buf[ONENAND_PAGE_SIZE];
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    for (uint32_t p = 0; p < total_pages; p++) {
+        size_t offset = (size_t)p * ONENAND_PAGE_SIZE;
+        memset(page_buf, 0xFF, sizeof(page_buf));
+
+        size_t copy_sz = payload_len - offset;
+        if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
+        memcpy(page_buf, payload + offset, copy_sz);
+
+        if (flasher_ofls_write_page(s, ONENAND_PART_BSR_START, p, page_buf, sizeof(page_buf)) != 0) {
+            fprintf(stderr, "\n[-] PSI write failed at Block 0, Page %u (page %u / %u)\n",
+                    p, p + 1, total_pages);
+            if (fls) fls_close(fls);
+            if (raw_buf) free(raw_buf);
+            return -1;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start_time.tv_sec) + (now.tv_nsec - start_time.tv_nsec) / 1e9;
+        double speed_kb = (elapsed > 0.05) ? (((size_t)(p + 1) * 2) / elapsed) : 0.0;
+        int pct = (int)(((p + 1) * 100ULL) / total_pages);
+        printf("\r[*] [PSI] Progress: %3d%% (%u / %u pages, Block 0 Page %u, %.1f KB/s)   ",
+               pct, p + 1, total_pages, p, speed_kb);
+        fflush(stdout);
+    }
+
+    printf("\n[+] PSI (Block 0) flashed successfully! (%u pages written)\n", total_pages);
+
+    if (fls) fls_close(fls);
+    if (raw_buf) free(raw_buf);
+    return 0;
+}
+
 int flasher_flash_slb(flasher_session_t *s, const char *slb_path) {
     if (!s || !slb_path || access(slb_path, R_OK) != 0) {
         fprintf(stderr, "[-] Cannot access SLB container: %s (%s)\n", slb_path ? slb_path : "<null>", strerror(errno));
@@ -1971,7 +2076,28 @@ int flasher_flash(flasher_session_t *s) {
     /* 3. Execute requested flash operations */
     int flashed_count = 0;
 
-    /* A. Dedicated SLB section FLS (--slb) -> Blocks 2..4 (Second Level Bootloader flashed FIRST) */
+    /* A. Primary Stage Initializer (PSI / BSR) -> Block 0 (flashed FIRST) */
+    const char *psi_to_flash = s->config.flash_psi_path ? s->config.flash_psi_path : s->config.psi_path;
+    bool should_flash_psi = s->config.flash_psi;
+
+    if (!should_flash_psi && !s->config.no_flash_psi && psi_to_flash) {
+        fls_file_t *test_fls = fls_open(psi_to_flash);
+        if (test_fls) {
+            if (fls_find_chunk(test_fls, FLS_TAG_IMAGE_DATA) != NULL) {
+                should_flash_psi = true;
+            }
+            fls_close(test_fls);
+        }
+    }
+
+    if (should_flash_psi && psi_to_flash) {
+        if (flasher_flash_psi(s, psi_to_flash) != 0) {
+            return -1;
+        }
+        flashed_count++;
+    }
+
+    /* B. Dedicated SLB section FLS (--slb) -> Blocks 2..4 (Second Level Bootloader) */
     if (s->config.slb_path) {
         if (flasher_flash_slb(s, s->config.slb_path) != 0) {
             return -1;
@@ -1979,7 +2105,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* B. Dedicated CODE partition binary (--code) */
+    /* C. Dedicated CODE partition binary (--code) */
     if (s->config.code_path) {
         if (flasher_flash_binary_to_partition(s, s->config.code_path,
                                               ONENAND_PART_CODE_START,
@@ -1989,7 +2115,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* C. Dedicated CSC partition binary (--csc) */
+    /* D. Dedicated CSC partition binary (--csc) */
     if (s->config.csc_path) {
         if (flasher_flash_binary_to_partition(s, s->config.csc_path,
                                               ONENAND_PART_CSC_START,
@@ -1999,7 +2125,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* D. Unified or Section FLS container (--fls) */
+    /* E. Unified or Section FLS container (--fls) */
     if (s->config.fls_path && (!s->config.slb_path || strcmp(s->config.fls_path, s->config.slb_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.fls_path) != 0) {
             return -1;
@@ -2007,7 +2133,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* E. BSY section FLS (--bsy) */
+    /* F. BSY section FLS (--bsy) */
     if (s->config.bsy_path && (!s->config.fls_path || strcmp(s->config.bsy_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.bsy_path) != 0) {
             return -1;
@@ -2015,7 +2141,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* F. CDS section FLS (--cds) */
+    /* G. CDS section FLS (--cds) */
     if (s->config.cds_path && (!s->config.fls_path || strcmp(s->config.cds_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.cds_path) != 0) {
             return -1;
@@ -2023,7 +2149,7 @@ int flasher_flash(flasher_session_t *s) {
         flashed_count++;
     }
 
-    /* G. DFFS / CSC section (--dffs) */
+    /* H. DFFS / CSC section (--dffs) */
     if (!s->config.skip_csc && s->config.dffs_path && (!s->config.fls_path || strcmp(s->config.dffs_path, s->config.fls_path) != 0)) {
         if (flasher_flash_fls_container(s, s->config.dffs_path) != 0) {
             return -1;

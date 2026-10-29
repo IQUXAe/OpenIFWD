@@ -113,6 +113,9 @@ static void print_usage(const char *prog) {
     printf("  --bin <file.bin>        Raw binary payload for ram-boot\n");
     printf("  --addr <hex>            Target SDRAM execution address (default: 0x60000000)\n");
     printf("  --psi <file.fls/bin>    Vendor PSI Stage 1 container (.fls) or raw binary (auto-detected if omitted)\n");
+    printf("  --flash-psi [file.fls]  Flash PSI primary bootloader into OneNAND Block 0 (BSR)\n");
+    printf("  --bsr [file.fls]        Alias for --flash-psi\n");
+    printf("  --no-flash-psi          Skip writing PSI into Block 0 during full flash\n");
     printf("  --skip-psi-sha256       Skip SHA-256 integrity verification of PSI binary\n");
     printf("  --skip-psi-check        Alias for --skip-psi-sha256\n");
     printf("  --slb <file.fls>        Second Level Bootloader (_slb.fls, Block 2..9)\n");
@@ -136,6 +139,7 @@ static void print_usage(const char *prog) {
     printf("  %s flasher-read -p usb -b 2 --page 0 --hex\n", prog);
     printf("  %s flasher-read -p usb -b 0 --page 0 -o block0_page0.bin\n", prog);
     printf("  %s flasher-erase -p usb -b 10 -c 1\n", prog);
+    printf("  %s flasher-write -p usb -b 0 -i block0_dump.bin\n", prog);
     printf("  %s flasher-write -p usb -b 10 --page 0 -i custom_payload.bin\n", prog);
     printf("  %s dump-bootrom -p usb -o bootrom_pmb8815_32k.bin -v\n", prog);
     printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
@@ -334,6 +338,10 @@ int main(int argc, char **argv) {
             {"no-autodetect", no_argument,   0, 1013},
             {"auto",      no_argument,       0, 1014},
             {"force-auto", no_argument,      0, 1014},
+            {"flash-psi", optional_argument, 0, 1025},
+            {"bsr",       optional_argument, 0, 1025},
+            {"skip-flash-psi", no_argument,   0, 1026},
+            {"no-flash-psi",   no_argument,   0, 1026},
             {"skip-psi-sha256", no_argument, 0, 1020},
             {"skip-psi-check",  no_argument, 0, 1020},
             {"skip-psi-hash",   no_argument, 0, 1020},
@@ -362,6 +370,13 @@ int main(int argc, char **argv) {
                 case 1008: cfg.force_dangerous_erase = true; break;
                 case 1013: cfg.no_auto = true; break;
                 case 1014: cfg.force_auto = true; break;
+                case 1025:
+                    cfg.flash_psi = true;
+                    if (optarg) cfg.flash_psi_path = optarg;
+                    break;
+                case 1026:
+                    cfg.no_flash_psi = true;
+                    break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
@@ -384,7 +399,8 @@ int main(int argc, char **argv) {
         bool has_explicit_targets = (cfg.fls_path != NULL || cfg.slb_path != NULL ||
                                      cfg.bsy_path != NULL || cfg.code_path != NULL ||
                                      cfg.csc_path != NULL || cfg.cds_path != NULL ||
-                                     cfg.dffs_path != NULL);
+                                     cfg.dffs_path != NULL || cfg.flash_psi ||
+                                     cfg.flash_psi_path != NULL);
 
         if (!cfg.no_auto && (!has_explicit_targets || cfg.force_auto)) {
             auto_detect_firmware_files(&cfg, auto_slb, auto_bsy, auto_cds, auto_dffs, sizeof(auto_bsy));
@@ -1036,6 +1052,7 @@ int main(int argc, char **argv) {
         const char *port = NULL;
         uint32_t block = 0;
         uint32_t page = 0;
+        bool has_page = false;
         const char *in_path = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -1064,10 +1081,14 @@ int main(int argc, char **argv) {
             switch (opt) {
                 case 'd': port = optarg; break;
                 case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
-                case 'P': page = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'P':
+                    page = (uint32_t)strtoul(optarg, NULL, 0);
+                    has_page = true;
+                    break;
                 case 'p':
                     if (optarg[0] >= '0' && optarg[0] <= '9') {
                         page = (uint32_t)strtoul(optarg, NULL, 0);
+                        has_page = true;
                     } else {
                         port = optarg;
                     }
@@ -1092,21 +1113,88 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[-] Failed to open input file: %s (%s)\n", in_path, strerror(errno));
             return 1;
         }
-        uint8_t page_buf[2048];
-        size_t n = fread(page_buf, 1, 2048, f);
-        fclose(f);
-        if (n < 2048) {
-            memset(page_buf + n, 0xFF, 2048 - n);
+
+        fseek(f, 0, SEEK_END);
+        long file_sz = ftell(f);
+        rewind(f);
+
+        if (file_sz <= 0) {
+            fprintf(stderr, "[-] Error: Input file %s is empty\n", in_path);
+            fclose(f);
+            return 1;
         }
 
         transport_t *trans = NULL;
         flasher_session_t *session = init_session(port, &cfg, &trans);
-        if (!session) return 1;
-
-        int res = flasher_ofls_write_page(session, block, page, page_buf, 2048);
-        if (res == 0) {
-            printf("[+] Successfully programmed 2048 bytes to Block %u, Page %u!\n", block, page);
+        if (!session) {
+            fclose(f);
+            return 1;
         }
+
+        int res = 0;
+        if (!has_page || file_sz > (long)ONENAND_PAGE_SIZE) {
+            /* Streaming / multi-block mode */
+            uint32_t blocks = (uint32_t)((file_sz + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);
+            uint32_t total_pages = (uint32_t)((file_sz + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+
+            printf("[*] Multi-page write: %ld bytes -> %u block(s), %u page(s) starting from Block %u\n",
+                   file_sz, blocks, total_pages, block);
+
+            /* Erase target blocks first */
+            printf("[*] Erasing %u block(s) starting from Block %u...\n", blocks, block);
+            res = flasher_ofls_erase(session, block, blocks);
+            if (res != 0) {
+                fprintf(stderr, "[-] Failed to erase block range %u..%u\n", block, block + blocks - 1);
+                fclose(f);
+                flasher_destroy(session);
+                transport_destroy(trans);
+                return res;
+            }
+
+            uint8_t page_buf[ONENAND_PAGE_SIZE];
+            for (uint32_t p = 0; p < total_pages; p++) {
+                uint32_t curr_blk = block + (p / ONENAND_PAGES_PER_BLOCK);
+                uint32_t curr_page = p % ONENAND_PAGES_PER_BLOCK;
+
+                memset(page_buf, 0xFF, sizeof(page_buf));
+                size_t n = fread(page_buf, 1, sizeof(page_buf), f);
+                if (n == 0 && ferror(f)) {
+                    fprintf(stderr, "\n[-] File read error at page %u\n", p);
+                    res = -1;
+                    break;
+                }
+
+                res = flasher_ofls_write_page(session, curr_blk, curr_page, page_buf, sizeof(page_buf));
+                if (res != 0) {
+                    fprintf(stderr, "\n[-] Failed to write Block %u, Page %u (status %d)\n", curr_blk, curr_page, res);
+                    break;
+                }
+
+                int pct = (int)(((p + 1) * 100ULL) / total_pages);
+                printf("\r[*] Progress: %3d%% (%u / %u pages written, Block %u Page %u)   ",
+                       pct, p + 1, total_pages, curr_blk, curr_page);
+                fflush(stdout);
+            }
+            if (res == 0) {
+                printf("\n[+] Successfully programmed %ld bytes (%u pages) across %u block(s) starting at Block %u!\n",
+                       file_sz, total_pages, blocks, block);
+            }
+        } else {
+            /* Single page targeted write mode */
+            uint8_t page_buf[ONENAND_PAGE_SIZE];
+            memset(page_buf, 0xFF, sizeof(page_buf));
+            size_t n = fread(page_buf, 1, sizeof(page_buf), f);
+            (void)n;
+
+            res = flasher_ofls_write_page(session, block, page, page_buf, sizeof(page_buf));
+            if (res == 0) {
+                printf("[+] Successfully programmed 2048 bytes to Block %u, Page %u!\n", block, page);
+            } else {
+                fprintf(stderr, "[-] Failed to write Block %u, Page %u (status %d)\n", block, page, res);
+            }
+        }
+
+        fclose(f);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;

@@ -30,6 +30,9 @@ typedef struct {
     bool force_auto;          /* Force automatic detection even when explicit targets are specified */
     bool is_usb;              /* Direct USB connection (EP 0x02 OUT / EP 0x83 IN) */
     bool verbose;             /* Verbose logging (hex dumps, packet traces) */
+    bool flash_psi;           /* Explicitly flash PSI (Block 0 / BSR) into OneNAND */
+    bool no_flash_psi;        /* Force skip flashing PSI into Block 0 */
+    const char *flash_psi_path; /* Path to PSI file to flash to Block 0 (defaults to psi_path) */
     const char *ram_exec_bin; /* Binary to load into RAM */
     uint32_t ram_exec_addr;   /* RAM execution target address (e.g. 0x60000000) */
 } flasher_config_t;
@@ -128,6 +131,7 @@ int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *dat
 int flasher_flash(flasher_session_t *s);
 int flasher_verify_psi_sha256(const uint8_t *psi_data, size_t psi_len);
 int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path, uint32_t start_block, uint32_t max_blocks, const char *label);
+int flasher_flash_psi(flasher_session_t *s, const char *psi_path);
 int flasher_flash_slb(flasher_session_t *s, const char *slb_path);
 int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path);
 
