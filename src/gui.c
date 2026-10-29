@@ -320,7 +320,7 @@ finish:
     return NULL;
 }
 
-/* Worker Thread: NVRAM Backup (Blocks 4..11 = 1 MB) */
+/* Worker Thread: NVRAM Backup (Blocks 978..985 = 1 MB) */
 typedef struct {
     char *port;
     uint32_t baudrate;
@@ -366,7 +366,7 @@ static void *worker_nvram_thread(void *arg) {
     }
 
     gui_set_progress_async(0.30, "Dumping NVRAM (1MB)...");
-    gui_log_async("[*] Reading NVRAM blocks 4..11 (0x60080000 - 0x60180000)...\n");
+    gui_log_async("[*] Reading NVRAM blocks 978..985 (0x07A40000 - 0x07B40000)...\n");
     if (flasher_dump_nvram(s, args->out_path) != 0) {
         gui_log_async("[-] Failed to dump NVRAM.\n");
         gui_set_progress_async(0.0, "NVRAM Dump Failed");

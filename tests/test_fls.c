@@ -279,29 +279,30 @@ static void test_nvram_safety(void) {
     printf("[TEST] Testing NVRAM memory safety protection (is_flash_range_safe)...\n");
 
     /* 1. Regions completely outside NVRAM range */
-    assert(is_flash_range_safe(0x00090000, 0x00020000) == true); /* PSI Flash */
-    assert(is_flash_range_safe(0x60000000, 0x00080000) == true); /* Blocks 0..3 (ends at 0x60080000) */
-    assert(is_flash_range_safe(0x60180000, 0x00100000) == true); /* Starts after NVRAM (Block 12) */
-    assert(is_flash_range_safe(0x63200000, 0x01C00000) == true); /* CODE section */
+    assert(is_flash_range_safe(0x00000000, 0x00020000) == true); /* Block 0: BSR (psi_flash) */
+    assert(is_flash_range_safe(0x00040000, 0x00060000) == true); /* Blocks 2..4: SLB */
+    assert(is_flash_range_safe(0x00140000, 0x02840000) == true); /* Blocks 10..331: CODE / BSY */
+    assert(is_flash_range_safe(0x07B40000, 0x00100000) == true); /* Starts after DYN_EEP (Block 986) */
 
     /* 2. Exact NVRAM range */
     assert(is_flash_range_safe(NVRAM_PROTECTED_START, NVRAM_PROTECTED_SIZE) == false);
 
     /* 3. Sub-ranges inside NVRAM */
-    assert(is_flash_range_safe(0x60080000, 0x1000) == false);     /* Beginning of NVRAM */
-    assert(is_flash_range_safe(0x6017F000, 0x1000) == false);     /* End of NVRAM */
-    assert(is_flash_range_safe(0x60090000, 0x1000) == false);     /* Middle of NVRAM */
+    assert(is_flash_range_safe(0x07A40000, 0x1000) == false);     /* Beginning of NVRAM */
+    assert(is_flash_range_safe(0x07B3F000, 0x1000) == false);     /* End of NVRAM */
+    assert(is_flash_range_safe(0x07A80000, 0x1000) == false);     /* Middle of NVRAM */
 
     /* 4. Overlapping boundaries */
-    assert(is_flash_range_safe(0x60070000, 0x00020000) == false); /* Crosses start boundary */
-    assert(is_flash_range_safe(0x60100000, 0x00100000) == false); /* Crosses end boundary */
-    assert(is_flash_range_safe(0x60000000, 0x00200000) == false); /* Completely encloses NVRAM */
+    assert(is_flash_range_safe(0x07A30000, 0x00020000) == false); /* Crosses start boundary */
+    assert(is_flash_range_safe(0x07B00000, 0x00100000) == false); /* Crosses end boundary */
+    assert(is_flash_range_safe(0x07000000, 0x01000000) == false); /* Completely encloses NVRAM */
 
     /* 5. NVRAM Dump Geometry & Parameters */
-    assert(NVRAM_BLOCK_START == 4U);
-    assert(NVRAM_BLOCK_END == 11U);
-    assert(NVRAM_PROTECTED_START == 0x60080000U);
-    assert(NVRAM_PROTECTED_END == 0x60180000U);
+    assert(NVRAM_BLOCK_START == 978U);
+    assert(NVRAM_BLOCK_END == 985U);
+    assert(NVRAM_BLOCK_COUNT == 8U);
+    assert(NVRAM_PROTECTED_START == 0x07A40000U);
+    assert(NVRAM_PROTECTED_END == 0x07B40000U);
     assert(NVRAM_PROTECTED_SIZE == 0x00100000U); /* Exactly 1 MB = 8 blocks * 128 KB */
 
     printf("[TEST] NVRAM memory safety and dump geometry PASSED!\n");

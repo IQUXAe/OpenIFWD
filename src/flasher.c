@@ -1166,7 +1166,7 @@ int flasher_dump_bootrom(flasher_session_t *s, const char *out_path) {
 }
 
 int flasher_dump_nvram(flasher_session_t *s, const char *out_path) {
-    return flasher_dump_memory(s, 0x60080000, 0x00100000, out_path, 2048);
+    return flasher_dump_nand(s, NVRAM_BLOCK_START, NVRAM_BLOCK_COUNT, out_path);
 }
 
 int flasher_boot_ram(flasher_session_t *s, uint32_t ram_addr, const uint8_t *data, size_t size) {

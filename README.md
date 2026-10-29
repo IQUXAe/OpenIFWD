@@ -66,19 +66,16 @@ Block size: 131,072 bytes (128 KB = 64 pages of 2048 bytes). Total: 1024 blocks.
 - `flasher-boot`: Uploads and executes `open_flasher` in RAM without touching flash memory.
 
 ### 3. Memory and Firmware Dumps (`dump-*`)
-- `dump-nvram`: Dumps the 1 MB calibration and IMEI area (`0x60080000`–`0x60180000`) to a file.
+- `dump-nvram`: Dumps the 1 MB calibration and IMEI area (OneNAND blocks 978..985 / `DYN_EEP`, `0x07A40000`–`0x07B3FFFF`) to a file.
 - `dump-bootrom`: Dumps the 32 KB on-chip mask Boot ROM from physical address `0x00400000`.
 - `dump-nand`: Dumps a specified range of OneNAND physical blocks to a binary file.
 - `dump-memory`: Dumps an arbitrary physical memory address range over USB.
 
-### 4. Direct RAM Execution (`ram-boot`)
-- Uploads raw ARM binary code directly to Mobile DDR SDRAM (`0x60000000`) over USB and branches to it. Flash memory is not touched.
-
-### 5. Container Inspection (`info`, `unpack`)
+### 4. Container Inspection (`info`, `unpack`)
 - `info`: Displays FLS container headers, TOC entries, chunk tags, memory classes, and payload offsets.
 - `unpack`: Extracts raw payloads from all chunks within an FLS file into a target directory.
 
-### 6. Graphical Interface (`openifwd-gui`)
+### 5. Graphical Interface (`openifwd-gui`)
 - Built on GTK+ 3.
 - Automatic root privilege escalation via Polkit (`pkexec`) when launched by an unprivileged user (preserving Wayland and X11 display environment), with fallback to `sudo -E` and `su`.
 - Real-time USB polling, partition file selection, flashing progress indicators, and one-click NVRAM/Boot ROM extraction.
@@ -171,7 +168,7 @@ sudo ./openifwd flasher-read -p usb -b 2 --page 0 --hex --all
 
 ### 8. Memory and Partition Dumps
 ```bash
-# Dump NVRAM (RF calibrations and IMEI, 1 MB):
+# Dump NVRAM (RF calibrations and IMEI, OneNAND blocks 978..985, 1 MB):
 sudo ./openifwd dump-nvram -p usb -o nvram_backup.bin
 
 # Dump 32 KB hardware mask Boot ROM:
@@ -181,12 +178,7 @@ sudo ./openifwd dump-bootrom -p usb -o bootrom_pmb8815_32k.bin
 sudo ./openifwd dump-nand -p usb -b 0 -c 10 -o nand_blocks_0_9.bin
 ```
 
-### 9. Direct SDRAM Execution (Bypassing Flash)
-```bash
-sudo ./openifwd ram-boot -p usb --bin baremetal_kernel.bin --addr 0x60000000
-```
-
-### 10. Inspect FLS Container
+### 9. Inspect FLS Container
 ```bash
 ./openifwd info S5222XXMJ1_psi.fls
 ```

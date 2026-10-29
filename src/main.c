@@ -144,9 +144,8 @@ static void print_usage(const char *prog) {
     printf("  %s dump-bootrom -p usb -o bootrom_pmb8815_32k.bin -v\n", prog);
     printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 0 -c 1 -o nand_block0_boot.bin -v\n", prog);
-    printf("  %s dump-nand -p usb -b 4 -c 8 -o nand_nvram_backup.bin -v\n", prog);
+    printf("  %s dump-nand -p usb -b 978 -c 8 -o nand_nvram_backup.bin -v\n", prog);
     printf("  %s dump-memory -p usb -a 0xFFFF0000 -l 0x10000 -o bootrom_high.bin -v\n", prog);
-    printf("  %s dump-memory -p usb -a 0x60080000 -l 0x100000 -o nvram_backup.bin -v\n", prog);
     printf("  %s ram-boot -p usb --bin my_os.bin --addr 0x60000000\n", prog);
     printf("====================================================================\n");
 }

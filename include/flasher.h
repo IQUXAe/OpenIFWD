@@ -47,21 +47,22 @@ typedef struct {
     openifwd_hw_info_t hw_info;
 } flasher_session_t;
 
-/* NVRAM / EEPROM Protected Range: Blocks 4..11 (0x60080000 - 0x60180000, 1 MB) */
-#define NVRAM_BLOCK_START            4U
-#define NVRAM_BLOCK_END              11U
-#define NVRAM_PROTECTED_START        0x60080000U
-#define NVRAM_PROTECTED_END          0x60180000U
-#define NVRAM_PROTECTED_SIZE         0x00100000U
-#define NVRAM_PROTECT_START          NVRAM_PROTECTED_START
-#define NVRAM_PROTECT_END            NVRAM_PROTECTED_END
-#define NVRAM_PROTECT_SIZE           NVRAM_PROTECTED_SIZE
-#define IFWD_ERR_NVRAM_PROTECTED     0xEE01
-
 /* Samsung GT-S5222 OneNAND Partition Map (XSR Layout) */
 #define ONENAND_PAGE_SIZE            2048U
 #define ONENAND_PAGES_PER_BLOCK      64U
 #define ONENAND_BLOCK_SIZE           (ONENAND_PAGE_SIZE * ONENAND_PAGES_PER_BLOCK) /* 128 KB */
+
+/* NVRAM / EEPROM Protected Range: Blocks 978..985 (DYN_EEP: RF calibrations & IMEI, 1 MB) */
+#define NVRAM_BLOCK_START            978U
+#define NVRAM_BLOCK_END              985U
+#define NVRAM_BLOCK_COUNT            8U
+#define NVRAM_PROTECTED_START        (NVRAM_BLOCK_START * ONENAND_BLOCK_SIZE) /* 0x07A40000 */
+#define NVRAM_PROTECTED_END          ((NVRAM_BLOCK_END + 1U) * ONENAND_BLOCK_SIZE) /* 0x07B40000 */
+#define NVRAM_PROTECTED_SIZE         (NVRAM_BLOCK_COUNT * ONENAND_BLOCK_SIZE) /* 0x00100000 (1 MB) */
+#define NVRAM_PROTECT_START          NVRAM_PROTECTED_START
+#define NVRAM_PROTECT_END            NVRAM_PROTECTED_END
+#define NVRAM_PROTECT_SIZE           NVRAM_PROTECTED_SIZE
+#define IFWD_ERR_NVRAM_PROTECTED     0xEE01
 
 #define ONENAND_PART_BSR_START       0U
 #define ONENAND_PART_BSR_BLOCKS      1U
