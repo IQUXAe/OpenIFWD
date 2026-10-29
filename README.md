@@ -1,129 +1,195 @@
-# OpenIFWD
+# openIFWD
 
-Open-source firmware flasher and RAM boot tool for Samsung Star 3 (GT-S5222) and Intel/Infineon XMM2150 (X-Gold 215 / PMB8815) baseband devices.
+Low-level flashing and diagnostic utility for Infineon PMB8815 (ARMv5TEJ / ARM926EJ-S, X-Gold 215 / XMM2150 platform) and Samsung OneNAND flash memory (KFM1G16Q2C) on the Samsung GT-S5222 (Star 3 Duos).
 
-Replaces the proprietary Windows FlashTool E2 utility and vendor EBL binaries with a clean C11 implementation and a lightweight bare-metal Rust Primary Stage Initializer (PSI).
-
----
-
-## Key Features
-
-- **Built-in Open Rust PSI (Default)**:
-  - Embeds a tiny 4 KB bare-metal Rust loader (`psi_open.bin`).
-  - Completely eliminates dependency on the proprietary 600 KB Samsung/Infineon `ebl.bin` loader.
-  - Speaks the standard [OpenIFWD Wire Protocol](docs/OPENIFWD_PROTOCOL.md) (`'OFWD'` magic, 11-byte headers, CRC-16 integrity).
-  - Custom PSI binaries can still be supplied using `--psi <path>`.
-
-- **Safe NVRAM / EEPROM Backup (`dump-nvram`)**:
-  - Dumps the 1 MB NVRAM partition (OneNAND blocks 4..11, `0x60080000`–`0x60180000`) containing device IMEI, board calibrations, and RF tuning data.
-  - Hardware write protection in the Open PSI prevents accidental erasure or corruption of these blocks.
-
-- **Direct RAM Booting (`ram-boot`)**:
-  - Streams bare-metal code directly into Mobile DDR SDRAM (default `0x60000000`) and jumps to it.
-  - Enables kernel/OS development without touching or wearing out flash memory.
-
-- **Stock Firmware Flashing (`flash`)**:
-  - Supports writing stock Samsung `.fls` containers (`_BSY.fls`, `_CDS.fls`) and filesystem dumps (`.dffs`).
-  - Supports full OneNAND erase or selective partition writes.
-
-- **Transports**:
-  - Direct USB Bulk transfer via `libusb-1.0` (`VID: 058b`, `PID: 0041`).
-  - Serial TTY (`/dev/ttyACM*`, `/dev/ttyUSB*`).
-
-- **Interfaces**:
-  - Fast, scriptable CLI: `openifwd`.
-  - Desktop GTK 3 GUI: `openifwd-gui` (with port scanner, progress bar, NVRAM backup, and RAM boot controls).
+Communicates under Linux via direct `libusb-1.0` calls (USB bulk endpoints of Boot ROM and PSI: `058b:0041`) or serial interface (UART / TTY).
 
 ---
 
-## Dependencies & Building
+## Architecture and Execution Flow
+
+1. **Boot ROM Handshake:**
+   When powered on with the Volume Down key held, the on-chip mask Boot ROM (`0x00400000`, 32 KB) enters USB download mode (`VID: 058b`, `PID: 0041`). The host synchronizes using an `ATAT` ping-pong handshake and uploads the Primary Stage Initializer (`psi_ram`) to internal SRAM (`0x00080000`).
+
+2. **In-RAM Flasher Agent (`open_flasher`):**
+   Once PSI initializes system clocks and Mobile DDR SDRAM, the host uploads the bare-metal `open_flasher` payload directly to SDRAM (`0x60000000`, entry point `0x60000400`). The agent takes control, initializes the OneNAND controller (`0x40000000`), and transmits an initialization beacon (`RESP` / `PONG`) to Bulk IN endpoint `EP 0x83`.
+
+3. **OFLS Wire Protocol (OneNAND Flash Loader Service):**
+   All memory and flash operations are executed by the in-RAM agent using a synchronous binary protocol:
+   - Command packet: 16 bytes with magic signature `OFLS` (`0x534C464F`).
+   - Response packet: 16 bytes with magic signature `RESP` (`0x50534552`), error code, byte transfer counter, and status register/CRC fields.
+
+---
+
+## OneNAND Physical Partition Map (Samsung GT-S5222 / 128 MB)
+
+Block size: 131,072 bytes (128 KB = 64 pages of 2048 bytes). Total: 1024 blocks.
+
+| Blocks | OneNAND Offset | Size | Function |
+|---|---|---|---|
+| 0 | `0x00000000` | 128 KB | BSR: Primary Stage Initializer (`psi_flash`) |
+| 1 | `0x00020000` | 128 KB | Reserved / Boot Configuration |
+| 2..4 | `0x00040000` | 384 KB | SLB (Second Level Bootloader / EBL) |
+| 5..9 | `0x000A0000` | 640 KB | Bootloader partition reserve |
+| 10..331 | `0x00140000` | 41.25 MB | CODE / BSY (system OS image) |
+| 332..339 | `0x02980000` | 1 MB | CDS / CSC (customer data specifications and region) |
+| 340..977 | `0x02A80000` | 79.75 MB | IFS / DFFS (user filesystem partition) |
+| 978..985 | `0x07A40000` | 1 MB | `DYN_EEP` (NVRAM: RF calibrations, IMEI 1/2) |
+| 986..997 | `0x07B40000` | 1.5 MB | `STATE_EEP` (system calibrations) |
+| 998..1023 | `0x07CC0000` | 3.25 MB | XSR partition tables and metadata |
+
+> **NVRAM Protection:** Blocks 978..1023 are hardware-protected in software by `openIFWD`. Erase and write operations targeting this address range are blocked by both the host and the flasher agent (`IFWD_ERR_NVRAM_PROTECTED` / `0xEE01`) unless overridden with `--force-dangerous-erase`.
+
+---
+
+## Capabilities
+
+### 1. Firmware Flashing (`flash`)
+- **FLS Container Parsing:** Extracts raw executable payloads from Tag 12 (`IMAGE_DATA`) chunks by stripping vendor 28-byte chunk subheaders.
+- **Block 0 (`psi_flash`) Programming:** Automatically extracts Tag 12 from `psi.fls` and writes it to Block 0 when specified or via `--flash-psi` / `--bsr`.
+- **Multi-Block SLB Flashing:** Computes flash geometry for 283,700-byte SLB payload (spanning 3 physical blocks: 2, 3, and 4; 139 pages), erases the target block range, streams pages sequentially, and pads the 139th page with `0xFF`.
+- **Component Flashing:** Flashes system components: BSY (`--bsy`), CDS (`--cds`), and DFFS/CSC (`--dffs`).
+- **Automatic File Discovery:** Automatically detects companion firmware files within the same directory unless disabled with `--no-auto`.
+- **PSI Integrity Check:** Verifies PSI binary SHA-256 against known Samsung GT-S5222 stock hashes, with optional bypass flag (`--skip-psi-sha256`).
+
+### 2. Direct OneNAND Operations (`flasher-*`)
+- `flasher-id`: Reads and displays Manufacturer ID (`0x00EC`) and Device ID (`0x0055`).
+- `flasher-erase`: Erases a specified range of physical blocks. On failure, decodes and prints hardware status registers:
+  - `CTRL_STATUS (0x1E480)`: Erase failure, timeout, or write protection violation.
+  - `WP_STATUS (0x1E49C)`: Hardware write protection bits (`US`, `LS`, `LTS`).
+  - `INT_STATUS (0x1E482)`: Controller interrupt status flags.
+- `flasher-write`:
+  - **Streaming Mode** (file size > 2048 bytes or `--page` omitted): Computes required block count, erases target blocks, streams 2048-byte pages with progress display, and pads final page with `0xFF`.
+  - **Targeted Page Mode** (`--page X` with file size $\le$ 2048 bytes): Writes directly to a single 2048-byte page without erasing the block.
+- `flasher-read`: Reads a 2048-byte page to a binary file (`-o`) or prints formatted hex output to terminal (`--hex` / `-x`) with line limiting (`--lines N`, `--all`). Decodes OneNAND hardware ECC status.
+- `flasher-reset`: Performs hardware reboot via DWC2 controller.
+- `flasher-boot`: Uploads and executes `open_flasher` in RAM without touching flash memory.
+
+### 3. Memory and Firmware Dumps (`dump-*`)
+- `dump-nvram`: Dumps the 1 MB calibration and IMEI area (`0x60080000`–`0x60180000`) to a file.
+- `dump-bootrom`: Dumps the 32 KB on-chip mask Boot ROM from physical address `0x00400000`.
+- `dump-nand`: Dumps a specified range of OneNAND physical blocks to a binary file.
+- `dump-memory`: Dumps an arbitrary physical memory address range over USB.
+
+### 4. Direct RAM Execution (`ram-boot`)
+- Uploads raw ARM binary code directly to Mobile DDR SDRAM (`0x60000000`) over USB and branches to it. Flash memory is not touched.
+
+### 5. Container Inspection (`info`, `unpack`)
+- `info`: Displays FLS container headers, TOC entries, chunk tags, memory classes, and payload offsets.
+- `unpack`: Extracts raw payloads from all chunks within an FLS file into a target directory.
+
+### 6. Graphical Interface (`openifwd-gui`)
+- Built on GTK+ 3.
+- Automatic root privilege escalation via Polkit (`pkexec`) when launched by an unprivileged user (preserving Wayland and X11 display environment), with fallback to `sudo -E` and `su`.
+- Real-time USB polling, partition file selection, flashing progress indicators, and one-click NVRAM/Boot ROM extraction.
+
+---
+
+## Build and Dependencies
 
 ### Dependencies
 
-- **Arch Linux**:
-  ```bash
-  sudo pacman -S base-devel pkgconf libusb gtk3 pixman
-  ```
+**Arch Linux:**
+```bash
+sudo pacman -S base-devel pkgconf libusb gtk3
+```
 
-- **Debian / Ubuntu**:
-  ```bash
-  sudo apt install build-essential pkg-config libusb-1.0-0-dev libgtk-3-dev libpixman-1-dev
-  ```
+**Debian / Ubuntu:**
+```bash
+sudo apt install build-essential pkg-config libusb-1.0-0-dev libgtk-3-dev
+```
 
-### Build
+### Compilation
 
 ```bash
 make clean && make -j$(nproc)
 ```
+
+Generated binaries:
+- `openifwd` — CLI utility.
+- `openifwd-gui` — GTK+ 3 GUI.
+- `test_runner` — Unit test suite.
 
 Run test suite:
 ```bash
 make test
 ```
 
-This compiles:
-- `openifwd`: Command-line tool.
-- `openifwd-gui`: GTK 3 desktop application.
-- `test_runner`: Unit test runner.
-
 ---
 
 ## Usage Examples
 
-### 1. Connecting the Phone
-1. Disconnect the USB cable, power off the phone, and remove the SIM card and battery.
-2. Run your `openifwd` command (it will start polling for the device).
-3. Connect the micro-USB cable to the phone while holding **Volume Down**, or insert the battery ~1 second after connecting the cable.
-4. The silicon Boot ROM enumerates as `058b:0041` and begins handshaking.
+### 1. Device Connection
+1. Disconnect the USB cable, remove battery and SIM card.
+2. Launch `openifwd` command (it waits for the USB device).
+3. Hold **Volume Down**, insert the micro-USB cable, then reinsert the battery. The Boot ROM registers as `058b:0041`.
 
-### 2. Backup NVRAM (IMEI & RF Calibrations)
+### 2. Full Firmware Flash
 ```bash
-# Dump 1 MB NVRAM to file using direct USB:
-./openifwd dump-nvram -p usb -o s5222_nvram_backup.bin
-```
-
-### 3. RAM Boot (Direct SDRAM Execution)
-```bash
-# Load a bare-metal kernel binary to SDRAM and execute:
-./openifwd ram-boot -p usb --bin my_kernel.bin --addr 0x60000000
-```
-
-### 4. Flash Stock Firmware
-```bash
-# Using the built-in Open PSI (no stock PSI/SLB needed):
-./openifwd flash -p usb \
-    --bsy S5222XXMJ1_BSY.fls \
-    --cds S5222XXMJ1_CDS.fls \
-    --dffs S5222OXEMJ1_CSC.dffs
-
-# Using a custom PSI binary or container if desired:
-./openifwd flash -p usb \
+sudo ./openifwd flash -p usb \
     --psi S5222XXMJ1_psi.fls \
+    --fls S5222XXMJ1_BSY.fls
+```
+*(Companion files `SLB`, `CDS`, and `CSC` in the same directory are detected and queued automatically).*
+
+### 3. Flashing Selected Partitions
+```bash
+sudo ./openifwd flash -p usb \
+    --psi S5222XXMJ1_psi.fls \
+    --slb S5222XXMJ1_slb.fls \
     --bsy S5222XXMJ1_BSY.fls \
     --cds S5222XXMJ1_CDS.fls \
-    --erase-all
+    --dffs S5222OXEMJ1_CSC.dffs \
+    --no-auto
 ```
 
-### 5. Inspect or Unpack FLS Files
+### 4. Flashing Primary Bootloader to Block 0
 ```bash
-# Inspect container chunks:
-./openifwd info S5222XXMJ1_BSY.fls
-
-# Unpack all payload chunks to directory:
-./openifwd unpack S5222XXMJ1_BSY.fls ./unpacked/
+sudo ./openifwd flash -p usb --psi S5222XXMJ1_psi.fls --flash-psi
 ```
 
-### 6. GTK 3 GUI
+### 5. Multi-Block Binary Dump Writing
 ```bash
-./openifwd-gui
+# Erases Block 0 and writes the entire binary file across necessary pages:
+sudo ./openifwd flasher-write -p usb -b 0 -i dump_block0.bin
 ```
 
----
+### 6. Single-Page Writing
+```bash
+# Writes exactly 2048 bytes to page 5 of block 10 without erasing:
+sudo ./openifwd flasher-write -p usb -b 10 --page 5 -i page_patch.bin
+```
 
-## Documentation
+### 7. Reading a OneNAND Page with Hex Output
+```bash
+# Display first 8 lines (128 bytes) of page 0, block 2:
+sudo ./openifwd flasher-read -p usb -b 2 --page 0 --hex
 
-- [OpenIFWD Protocol Specification (v1.0)](docs/OPENIFWD_PROTOCOL.md): Packet wire format, framing, and command codes.
-- [Samsung GT-S5222 OneNAND Flash Layout (XSR Architecture)](docs/xsr_partition_table.md): Hardware flash partition map reverse-engineered from Block 1022 `XSRPART`.
+# Display full 2048-byte page:
+sudo ./openifwd flasher-read -p usb -b 2 --page 0 --hex --all
+```
+
+### 8. Memory and Partition Dumps
+```bash
+# Dump NVRAM (RF calibrations and IMEI, 1 MB):
+sudo ./openifwd dump-nvram -p usb -o nvram_backup.bin
+
+# Dump 32 KB hardware mask Boot ROM:
+sudo ./openifwd dump-bootrom -p usb -o bootrom_pmb8815_32k.bin
+
+# Dump first 10 blocks of OneNAND:
+sudo ./openifwd dump-nand -p usb -b 0 -c 10 -o nand_blocks_0_9.bin
+```
+
+### 9. Direct SDRAM Execution (Bypassing Flash)
+```bash
+sudo ./openifwd ram-boot -p usb --bin baremetal_kernel.bin --addr 0x60000000
+```
+
+### 10. Inspect FLS Container
+```bash
+./openifwd info S5222XXMJ1_psi.fls
+```
 
 ---
 
