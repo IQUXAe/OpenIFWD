@@ -101,6 +101,7 @@ static void print_usage(const char *prog) {
     printf("  -l, --lines <num>       Number of 16-byte hex dump lines to display (default: 8 = 128 bytes)\n");
     printf("  -a, --all, --full       Display full 2048-byte page hex dump (all 128 lines)\n");
     printf("  -i, --in, --input <file> Input file for page write\n");
+    printf("  --verify                Verify programmed pages by reading back from physical flash\n");
     printf("  -b, --block, --start-block <num> Starting block for NAND operations (0..1023)\n");
     printf("  -c, --count, --block-count <num> Number of blocks to dump / erase (default: 1)\n");
     printf("  -P, --page <num>        Page index within block (0..63)\n");
@@ -969,6 +970,7 @@ int main(int argc, char **argv) {
         uint32_t block = 0;
         uint32_t page = 0;
         bool has_page = false;
+        bool verify = false;
         const char *in_path = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -981,6 +983,7 @@ int main(int argc, char **argv) {
             {"page",      required_argument, 0, 'P'},
             {"input",     required_argument, 0, 'i'},
             {"in",        required_argument, 0, 'i'},
+            {"verify",    no_argument,       0, 1050},
             {"force-dangerous-erase", no_argument, 0, 1002},
             {"psi",       required_argument, 0, 1001},
             {"skip-psi-sha256", no_argument, 0, 1020},
@@ -1020,6 +1023,7 @@ int main(int argc, char **argv) {
                     }
                     break;
                 case 'i': in_path = optarg; break;
+                case 1050: verify = true; break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1002: cfg.force_dangerous_erase = true; break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
@@ -1104,6 +1108,48 @@ int main(int argc, char **argv) {
             if (res == 0) {
                 printf("\n[+] Successfully programmed %ld bytes (%u pages) across %u block(s) starting at Block %u!\n",
                        file_sz, total_pages, blocks, block);
+
+                if (verify) {
+                    printf("[*] Verifying written pages against input file...\n");
+                    rewind(f);
+                    uint8_t file_buf[ONENAND_PAGE_SIZE];
+                    uint8_t read_buf[ONENAND_PAGE_SIZE];
+                    bool verify_ok = true;
+
+                    for (uint32_t p = 0; p < total_pages; p++) {
+                        uint32_t curr_blk = block + (p / ONENAND_PAGES_PER_BLOCK);
+                        uint32_t curr_page = p % ONENAND_PAGES_PER_BLOCK;
+
+                        memset(file_buf, 0xFF, sizeof(file_buf));
+                        size_t n = fread(file_buf, 1, sizeof(file_buf), f);
+                        (void)n;
+
+                        int vr = flasher_ofls_read_page(session, curr_blk, curr_page, read_buf, sizeof(read_buf));
+                        if (vr != 0 && vr != 5) {
+                            fprintf(stderr, "\n[-] Read error during verification at Block %u Page %u (status %d)\n",
+                                    curr_blk, curr_page, vr);
+                            verify_ok = false;
+                            res = -1;
+                            break;
+                        }
+
+                        if (memcmp(file_buf, read_buf, ONENAND_PAGE_SIZE) != 0) {
+                            fprintf(stderr, "\n[-] VERIFICATION MISMATCH at Block %u, Page %u!\n", curr_blk, curr_page);
+                            verify_ok = false;
+                            res = -2;
+                            break;
+                        }
+
+                        int pct = (int)(((p + 1) * 100ULL) / total_pages);
+                        printf("\r[*] Verified: %3d%% (%u / %u pages matched)   ", pct, p + 1, total_pages);
+                        fflush(stdout);
+                    }
+
+                    if (verify_ok) {
+                        printf("\n[+] VERIFICATION SUCCESS: All %u page(s) (%ld bytes) verified byte-for-byte in physical OneNAND!\n",
+                               total_pages, file_sz);
+                    }
+                }
             }
         } else {
             /* Single page targeted write mode */
@@ -1115,6 +1161,21 @@ int main(int argc, char **argv) {
             res = flasher_ofls_write_page(session, block, page, page_buf, sizeof(page_buf));
             if (res == 0) {
                 printf("[+] Successfully programmed 2048 bytes to Block %u, Page %u!\n", block, page);
+
+                if (verify) {
+                    printf("[*] Verifying written page against input file...\n");
+                    uint8_t read_buf[ONENAND_PAGE_SIZE];
+                    int vr = flasher_ofls_read_page(session, block, page, read_buf, sizeof(read_buf));
+                    if (vr != 0 && vr != 5) {
+                        fprintf(stderr, "[-] Read error during verification (status %d)\n", vr);
+                        res = -1;
+                    } else if (memcmp(page_buf, read_buf, ONENAND_PAGE_SIZE) != 0) {
+                        fprintf(stderr, "[-] VERIFICATION MISMATCH at Block %u, Page %u!\n", block, page);
+                        res = -2;
+                    } else {
+                        printf("[+] VERIFICATION SUCCESS: Block %u, Page %u verified byte-for-byte in physical OneNAND!\n", block, page);
+                    }
+                }
             } else {
                 fprintf(stderr, "[-] Failed to write Block %u, Page %u (status %d)\n", block, page, res);
             }
