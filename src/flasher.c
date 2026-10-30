@@ -228,6 +228,18 @@ int bootrom_uart_sync(flasher_session_t *s, int timeout_sec) {
     return 0;
 }
 
+static int usb_drain_bulk_in(flasher_session_t *s, int timeout_ms) {
+    if (!s || !s->transport) return 0;
+    uint8_t dummy[1024];
+    int total_drained = 0;
+    while (1) {
+        int r = transport_read(s->transport, dummy, sizeof(dummy), timeout_ms);
+        if (r <= 0) break;
+        total_drained += r;
+    }
+    return total_drained;
+}
+
 int flasher_sync(flasher_session_t *s, int timeout_sec) {
     if (!s) return -1;
     if (!s->config.is_usb) {
@@ -266,7 +278,70 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
             /* Look for synchronization tokens */
             for (int i = 0; i < n; i++) {
                 uint8_t b = rx_buf[i];
-                if (b == 0x01 || b == 0x02 || b == 0x0A || b == 0xF0 || b == 0x17) {
+                if (b == BOOTROM_UART_START_TAG) {
+                    /* Received Boot ROM start token 0xF0! Assemble full 12-byte telemetry frame */
+                    printf("[+] Received Boot ROM sync token 0xF0! Halting sync probe.\n");
+                    uint8_t frame[BOOTROM_UART_FRAME_LEN];
+                    memset(frame, 0, sizeof(frame));
+                    frame[0] = BOOTROM_UART_START_TAG;
+                    size_t recvd = 1;
+
+                    /* Copy any subsequent bytes already received in rx_buf */
+                    int remaining = n - (i + 1);
+                    if (remaining > 0) {
+                        size_t to_copy = (remaining > (int)(BOOTROM_UART_FRAME_LEN - recvd))
+                                         ? (BOOTROM_UART_FRAME_LEN - recvd) : (size_t)remaining;
+                        memcpy(frame + recvd, rx_buf + i + 1, to_copy);
+                        recvd += to_copy;
+                    }
+
+                    /* 1. Read length byte if not yet present (expected: 0x0A) */
+                    if (recvd < 2) {
+                        int r = transport_read(s->transport, frame + recvd, 1, 100);
+                        if (r > 0) recvd += (size_t)r;
+                    }
+
+                    /* 2. Read remaining payload (frame[1] bytes, total 2 + frame[1]) */
+                    size_t target_len = BOOTROM_UART_FRAME_LEN;
+                    if (recvd >= 2) {
+                        target_len = 2 + frame[1];
+                        if (target_len > sizeof(frame)) target_len = sizeof(frame);
+                    }
+
+                    time_t f_start = time(NULL);
+                    while (recvd < target_len && (time(NULL) - f_start) < 2) {
+                        int r = transport_read(s->transport, frame + recvd, target_len - recvd, 50);
+                        if (r > 0) {
+                            recvd += (size_t)r;
+                        }
+                    }
+
+                    /* 3. Parse and display chip telemetry */
+                    bootrom_uart_telemetry_t telem;
+                    if (bootrom_uart_parse_telemetry(frame, recvd, &telem) == 0) {
+                        printf("\n[+] Boot ROM Synchronization successful! Handshake confirmed.\n");
+                        printf("[*] Target Chip Telemetry (12-byte identification frame):\n");
+                        printf("    Raw Frame:    ");
+                        for (size_t k = 0; k < recvd; k++) {
+                            printf("0x%02X ", frame[k]);
+                        }
+                        printf("\n");
+                        printf("    Chip ID/Rev:  0x%02X (Step: %u, Rev: %u)\n", telem.chip_id, telem.chip_step, telem.chip_rev);
+                        printf("    SCU Config:   0x%02X\n", telem.scu_cfg);
+                        printf("    Boot Mode:    0x%02X\n", telem.boot_mode);
+                        printf("    PLL / Clock:  0x%02X / 0x%02X\n", telem.pll_stat, telem.clk_div);
+                        printf("    Reset Reason: 0x%02X\n", telem.scu_reset);
+                        printf("    Power/Status: 0x%02X 0x%02X 0x%02X\n", telem.pwr_stat, telem.sys_stat, telem.sec_stat);
+                        s->chip_id = telem.chip_id;
+                    } else {
+                        printf("[!] Notice: Malformed sync frame candidate (got %zu/%u bytes, hdr=0x%02X, len=0x%02X, tail=0x%02X)\n",
+                               recvd, (unsigned int)target_len, frame[0],
+                               (recvd > 1 ? frame[1] : 0), (recvd > 0 ? frame[recvd - 1] : 0));
+                    }
+
+                    synced = true;
+                    break;
+                } else if (b == 0x01 || b == 0x02 || b == 0x0A || b == 0x17) {
                     printf("[+] Received Boot ROM sync token 0x%02X! Halting sync probe.\n", b);
                     synced = true;
                     break;
@@ -284,13 +359,10 @@ int flasher_sync(flasher_session_t *s, int timeout_sec) {
         return -1;
     }
 
-    /* Drain chip ID bytes from Boot ROM */
-    uint8_t drain[16];
-    int dn = transport_read(s->transport, drain, sizeof(drain), 100);
-    if (dn > 0) {
-        for (int i = 0; i < dn; i++) {
-            printf("[*] Drained 1 byte(s) of chip ID data: 0x%02X\n", drain[i]);
-        }
+    /* Thoroughly drain EP 0x83 (Bulk IN) of any residual bytes */
+    int drained = usb_drain_bulk_in(s, 50);
+    if (drained > 0) {
+        printf("[*] Drained %d residual byte(s) from Bulk IN endpoint\n", drained);
     }
 
     /* Clean leftover FIFO before PSI upload */
@@ -519,6 +591,14 @@ int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls) {
     boot_hdr[0] = 0x30;
     boot_hdr[1] = (uint8_t)(psi_size & 0xFF);
     boot_hdr[2] = (uint8_t)((psi_size >> 8) & 0xFF);
+
+    /* Ensure Bulk IN (EP 0x83) is completely drained before sending 0x30 command */
+    if (s->config.is_usb) {
+        int pre_drain = usb_drain_bulk_in(s, 20);
+        if (pre_drain > 0) {
+            printf("[*] Pre-0x30 drain: cleared %d residual byte(s) from Bulk IN\n", pre_drain);
+        }
+    }
 
     if (transport_write(s->transport, boot_hdr, 3) != 3) {
         fprintf(stderr, "[-] Failed to write Boot ROM 0x30 header\n");
