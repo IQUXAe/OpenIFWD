@@ -93,17 +93,149 @@ void flasher_destroy(flasher_session_t *session) {
     free(session);
 }
 
+int bootrom_uart_parse_telemetry(const uint8_t *frame, size_t len, bootrom_uart_telemetry_t *out_telem) {
+    if (!frame || len < BOOTROM_UART_FRAME_LEN) return -1;
+    if (frame[0] != BOOTROM_UART_START_TAG) return -2;
+    if (frame[1] != BOOTROM_UART_PAYLOAD_LEN) return -3;
+    if (frame[11] != BOOTROM_UART_STOP_TAG) return -4;
+
+    if (out_telem) {
+        memset(out_telem, 0, sizeof(*out_telem));
+        out_telem->scu_cfg   = frame[2];
+        out_telem->chip_id   = frame[3];
+        out_telem->chip_step = (frame[3] >> 4) & 0x0F;
+        out_telem->chip_rev  = frame[3] & 0x0F;
+        out_telem->boot_mode = frame[4];
+        out_telem->pll_stat  = frame[5];
+        out_telem->clk_div   = frame[6];
+        out_telem->scu_reset = frame[7];
+        out_telem->pwr_stat  = frame[8];
+        out_telem->sys_stat  = frame[9];
+        out_telem->sec_stat  = frame[10];
+    }
+    return 0;
+}
+
+int bootrom_uart_sync(flasher_session_t *s, int timeout_sec) {
+    if (!s || !s->transport) return -1;
+    if (timeout_sec <= 0) timeout_sec = 30;
+
+    printf("\n[*] ====================================================================\n");
+    printf("[*] Starting Boot ROM UART synchronization (115200 8N1)...\n");
+    printf("[*] Transmitting 'AT' handshake bursts (silicon polling window: 10 attempts)\n");
+    printf("[*] Please connect phone / apply power (JIG 523k or Vol Down + Cable + Battery)\n");
+    printf("[*] Waiting for Boot ROM response frame (timeout: %d seconds)...\n", timeout_sec);
+    printf("[*] ====================================================================\n");
+
+    /* 1. Assert DTR and RTS */
+    transport_set_control(s->transport, true, true);
+
+    /* 2. Flush serial buffers */
+    transport_flush(s->transport);
+
+    time_t start = time(NULL);
+    const uint8_t at_seq[2] = {'A', 'T'};
+    uint8_t frame[BOOTROM_UART_FRAME_LEN];
+    bool synced = false;
+
+    while ((int)(time(NULL) - start) < timeout_sec) {
+        /* Write 2 bytes "AT" (0x41 0x54) */
+        if (transport_write(s->transport, at_seq, 2) != 2) {
+            fprintf(stderr, "[-] Failed to write 'AT' sequence to serial port\n");
+            return -1;
+        }
+
+        /* Wait 5ms (usleep(5000)) */
+        usleep(5000);
+
+        /* Read incoming bytes looking for 0xF0 */
+        uint8_t rx_buf[64];
+        int n = transport_read(s->transport, rx_buf, sizeof(rx_buf), 5);
+        if (n > 0) {
+            for (int i = 0; i < n; i++) {
+                if (rx_buf[i] == BOOTROM_UART_START_TAG) {
+                    /* Found start marker 0xF0 */
+                    frame[0] = BOOTROM_UART_START_TAG;
+                    size_t recvd = 1;
+
+                    /* Copy any bytes that followed 0xF0 in the current buffer */
+                    int remaining = n - (i + 1);
+                    if (remaining > 0) {
+                        size_t to_copy = (remaining > (int)(BOOTROM_UART_FRAME_LEN - recvd))
+                                         ? (BOOTROM_UART_FRAME_LEN - recvd) : (size_t)remaining;
+                        memcpy(frame + recvd, rx_buf + i + 1, to_copy);
+                        recvd += to_copy;
+                    }
+
+                    /* Read until full 12-byte frame is collected or short timeout */
+                    time_t frame_start = time(NULL);
+                    while (recvd < BOOTROM_UART_FRAME_LEN && (time(NULL) - frame_start) < 2) {
+                        int rn = transport_read(s->transport, frame + recvd, BOOTROM_UART_FRAME_LEN - recvd, 50);
+                        if (rn > 0) {
+                            recvd += (size_t)rn;
+                        }
+                    }
+
+                    if (recvd == BOOTROM_UART_FRAME_LEN &&
+                        frame[1] == BOOTROM_UART_PAYLOAD_LEN &&
+                        frame[11] == BOOTROM_UART_STOP_TAG) {
+                        synced = true;
+                        break;
+                    } else {
+                        printf("[!] Notice: Malformed sync frame candidate (got %zu/%u bytes, hdr=0x%02X, len=0x%02X, tail=0x%02X)\n",
+                               recvd, (unsigned int)BOOTROM_UART_FRAME_LEN, frame[0],
+                               (recvd > 1 ? frame[1] : 0), (recvd > 0 ? frame[recvd - 1] : 0));
+                    }
+                }
+            }
+            if (synced) break;
+        }
+    }
+
+    if (!synced) {
+        fprintf(stderr, "\n[-] Ошибка: Устройство не ответило на AT-синхронизацию (таймаут %d секунд).\n", timeout_sec);
+        fprintf(stderr, "[-] Error: Device failed to respond to Boot ROM AT handshake. Please check connection and power cycle.\n\n");
+        return -ETIMEDOUT;
+    }
+
+    /* Decode chip telemetry */
+    bootrom_uart_telemetry_t telem;
+    if (bootrom_uart_parse_telemetry(frame, sizeof(frame), &telem) != 0) {
+        fprintf(stderr, "[-] Failed to parse chip telemetry\n");
+        return -1;
+    }
+
+    printf("\n[+] Boot ROM Synchronization successful! Handshake confirmed.\n");
+    printf("[*] Target Chip Telemetry (12-byte identification frame):\n");
+    printf("    Raw Frame:    ");
+    for (int i = 0; i < 12; i++) {
+        printf("0x%02X ", frame[i]);
+    }
+    printf("\n");
+    printf("    Chip ID/Rev:  0x%02X (Step: %u, Rev: %u)\n", telem.chip_id, telem.chip_step, telem.chip_rev);
+    printf("    SCU Config:   0x%02X\n", telem.scu_cfg);
+    printf("    Boot Mode:    0x%02X\n", telem.boot_mode);
+    printf("    PLL / Clock:  0x%02X / 0x%02X\n", telem.pll_stat, telem.clk_div);
+    printf("    Reset Reason: 0x%02X\n", telem.scu_reset);
+    printf("    Power/Status: 0x%02X 0x%02X 0x%02X\n", telem.pwr_stat, telem.sys_stat, telem.sec_stat);
+
+    s->chip_id = telem.chip_id;
+
+    /* Clean leftover FIFO and allow settling before IFWD frames */
+    usleep(10000);
+    transport_flush(s->transport);
+    printf("[+] Device synchronized with Boot ROM! Ready for IFWD protocol transfer.\n\n");
+    return 0;
+}
+
 int flasher_sync(flasher_session_t *s, int timeout_sec) {
     if (!s) return -1;
-    bool is_usb = s->config.is_usb;
-
-    printf("[*] Probing Boot ROM synchronization (Ping-Pong ATAT sync)...\n");
-    printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
-
-    if (!is_usb) {
-        /* Set DTR/RTS once before sync loop for UART */
-        transport_set_control(s->transport, true, true);
+    if (!s->config.is_usb) {
+        return bootrom_uart_sync(s, timeout_sec);
     }
+
+    printf("[*] Probing Boot ROM synchronization (USB Bulk Ping-Pong ATAT sync)...\n");
+    printf("[*] Please connect phone (hold Volume Down or plug cable without battery, then insert battery).\n");
 
     time_t start = time(NULL);
     const uint8_t sync_seq[] = "ATAT";

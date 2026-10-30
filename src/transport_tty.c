@@ -48,20 +48,18 @@ static int tty_apply_settings(int fd, uint32_t baud) {
         return -1;
     }
 
-    /* Set raw mode */
-    cfmakeraw(&tio);
+    /* POSIX raw mode configuration:
+     * c_iflag: 0 (disable IGNBRK, BRKINT, PARMRK, ISTRIP, INLCR, IGNCR, ICRNL, IXON)
+     * c_oflag: 0 (disable all output post-processing)
+     * c_lflag: 0 (disable ECHO, ECHONL, ICANON, ISIG, IEXTEN)
+     * c_cflag: CS8 | CREAD | CLOCAL (8 bits, enable receiver, ignore modem control lines, no parity, 1 stop bit)
+     * c_cc[VMIN] = 0, c_cc[VTIME] = 1 (100ms read timeout)
+     */
+    tio.c_iflag = 0;
+    tio.c_oflag = 0;
+    tio.c_lflag = 0;
+    tio.c_cflag = CS8 | CREAD | CLOCAL;
 
-    /* 8N1 */
-    tio.c_cflag &= ~PARENB;
-    tio.c_cflag &= ~CSTOPB;
-    tio.c_cflag &= ~CSIZE;
-    tio.c_cflag |= CS8;
-
-    /* Disable hardware flow control */
-    tio.c_cflag &= ~CRTSCTS;
-    tio.c_cflag |= (CLOCAL | CREAD);
-
-    /* Set non-blocking with 0.1s minimum timer */
     tio.c_cc[VMIN] = 0;
     tio.c_cc[VTIME] = 1;
 
@@ -88,12 +86,26 @@ static int tty_open(transport_t *t, const char *device_name, uint32_t baudrate) 
     for (int retry = 0; retry < 300; retry++) {
         fd = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (fd >= 0) break;
+
+        if (errno == EACCES) {
+            fprintf(stderr, "[-] Error: Permission denied accessing port %s (EACCES).\n", device_name);
+            fprintf(stderr, "[-] Please add your user to the 'dialout' or 'uucp' group (e.g. 'sudo usermod -aG dialout $USER') or run with sudo.\n");
+            return -1;
+        }
+        if (errno == EBUSY) {
+            fprintf(stderr, "[-] Error: Port %s is busy (EBUSY).\n", device_name);
+            fprintf(stderr, "[-] Another process (e.g. ModemManager, minicom, screen) is currently holding the port.\n");
+            fprintf(stderr, "[-] Tip: Run 'sudo systemctl stop ModemManager' or check 'lsof %s'.\n", device_name);
+            return -1;
+        }
+
         if (retry == 0) {
             printf("[*] Waiting for %s to become available (connect phone)...\n", device_name);
         }
         usleep(100000); /* 100ms */
     }
     if (fd < 0) {
+        fprintf(stderr, "[-] Error: Failed to open port %s: %s\n", device_name, strerror(errno));
         return -1;
     }
 
@@ -108,6 +120,7 @@ static int tty_open(transport_t *t, const char *device_name, uint32_t baudrate) 
     priv->fd = fd;
     priv->baudrate = baudrate;
     strncpy(priv->port_name, device_name, sizeof(priv->port_name) - 1);
+    printf("[+] Opened serial port %s at %u baud (8N1, Raw Mode)\n", device_name, baudrate);
     return 0;
 }
 

@@ -125,24 +125,25 @@ static void print_usage(const char *prog) {
     printf("  --skip-csc              Skip CSC/DFFS flash (boot target OS directly)\n");
     printf("  --no-auto               Disable automatic detection of companion firmware files\n");
     printf("  --force-auto            Force auto-detection even when specific target files are provided\n");
-    printf("  -b, --baud <rate>       Baud rate (default: 921600)\n");
+    printf("  -b, --baud <rate>       Baud rate (default: 115200)\n");
     printf("  --erase-all             Erase whole non-protected flash before writing\n");
     printf("  --force-dangerous-erase Allow erasing/writing protected calibration & metadata blocks (978..1023)\n");
     printf("  -v, --verbose           Enable verbose logging (hex dumps and USB packet traces)\n");
     printf("  -h, --help              Show this help menu\n\n");
     printf("Examples:\n");
     printf("  %s flash -p usb --psi S5222XXMJ1_psi.fls --fls S5222XXMJ1_BSY.fls\n", prog);
-    printf("  %s flash -p usb --fls S5222XXMJ1_OXEMJ1/S5222XXMJ1_BSY.fls\n", prog);
+    printf("  %s flash -p /dev/ttyUSB0 -b 115200 --psi S5222XXMJ1_psi.fls --fls S5222XXMJ1_BSY.fls\n", prog);
     printf("  %s flash -p usb --code code.bin --csc csc.bin\n", prog);
     printf("  %s flasher-boot -p usb\n", prog);
-    printf("  %s flasher-id -p usb\n", prog);
+    printf("  %s flasher-id -p /dev/ttyUSB0 -b 115200\n", prog);
     printf("  %s flasher-read -p usb -b 2 --page 0 --hex\n", prog);
-    printf("  %s flasher-read -p usb -b 0 --page 0 -o block0_page0.bin\n", prog);
+    printf("  %s flasher-read -p /dev/ttyUSB0 -b 0 --page 0 -o block0_page0.bin\n", prog);
     printf("  %s flasher-erase -p usb -b 10 -c 1\n", prog);
+    printf("  %s flasher-write -p /dev/ttyUSB0 -b 115200 --psi psi.fls -b 0 -i open_psi_block0.bin\n", prog);
     printf("  %s flasher-write -p usb -b 0 -i block0_dump.bin\n", prog);
     printf("  %s flasher-write -p usb -b 10 --page 0 -i custom_payload.bin\n", prog);
     printf("  %s dump-bootrom -p usb -o bootrom_pmb8815_32k.bin -v\n", prog);
-    printf("  %s dump-nvram -p usb -o s5222_nvram_backup.bin -v\n", prog);
+    printf("  %s dump-nvram -p /dev/ttyUSB0 -b 115200 -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 0 -c 1 -o nand_block0_boot.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 978 -c 8 -o nand_nvram_backup.bin -v\n", prog);
     printf("  %s dump-memory -p usb -a 0xFFFF0000 -l 0x10000 -o bootrom_high.bin -v\n", prog);
@@ -152,21 +153,22 @@ static void print_usage(const char *prog) {
 
 static flasher_session_t *init_session(const char *port, flasher_config_t *cfg, transport_t **out_trans) {
     if (!port) {
-        fprintf(stderr, "[-] Error: Device port is required (-p usb or -p /dev/ttyACM0)\n");
+        fprintf(stderr, "[-] Error: Device port is required (-p usb or -p /dev/ttyUSB0)\n");
         return NULL;
     }
     cfg->is_usb = (strcmp(port, "usb") == 0);
     transport_t *trans = NULL;
+    uint32_t baud = cfg->baudrate ? cfg->baudrate : 115200;
     if (cfg->is_usb) {
         trans = transport_create_usb();
-        if (!trans || transport_open(trans, NULL, cfg->baudrate) != 0) {
+        if (!trans || transport_open(trans, NULL, baud) != 0) {
             fprintf(stderr, "[-] Failed to open direct USB interface\n");
             if (trans) transport_destroy(trans);
             return NULL;
         }
     } else {
         trans = transport_create_tty();
-        if (!trans || transport_open(trans, port, 115200) != 0) {
+        if (!trans || transport_open(trans, port, baud) != 0) {
             fprintf(stderr, "[-] Failed to open port %s\n", port);
             if (trans) transport_destroy(trans);
             return NULL;
@@ -224,10 +226,11 @@ int main(int argc, char **argv) {
         uint32_t ram_addr = 0x60000000;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",    required_argument, 0, 'p'},
+            {"baud",    required_argument, 0, 'b'},
             {"bin",     required_argument, 0, 1001},
             {"addr",    required_argument, 0, 1002},
             {"psi",     required_argument, 0, 1003},
@@ -238,9 +241,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: bin_path = optarg; break;
                 case 1002: ram_addr = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1003: cfg.psi_path = optarg; break;
@@ -278,34 +282,14 @@ int main(int argc, char **argv) {
         }
         fclose(bf);
 
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-
         transport_t *trans = NULL;
-        if (cfg.is_usb) {
-            trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
-                fprintf(stderr, "[-] Failed to open direct USB interface\n");
-                if (trans) transport_destroy(trans);
-                free(bdata);
-                return 1;
-            }
-        } else {
-            trans = transport_create_tty();
-            if (!trans || transport_open(trans, port, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to open port %s\n", port);
-                if (trans) transport_destroy(trans);
-                free(bdata);
-                return 1;
-            }
+        flasher_session_t *s = init_session(port, &cfg, &trans);
+        if (!s) {
+            free(bdata);
+            return 1;
         }
 
-        if (cfg.verbose) {
-            transport_set_verbose(trans, true);
-        }
-
-        flasher_session_t *s = flasher_create(trans, &cfg);
         int res = flasher_boot_ram(s, ram_addr, bdata, (size_t)bsz);
-
         free(bdata);
         flasher_destroy(s);
         transport_destroy(trans);
@@ -315,7 +299,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "flash") == 0) {
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         const char *port = NULL;
 
@@ -407,30 +391,10 @@ int main(int argc, char **argv) {
             printf("[*] Specific firmware target(s) specified; auto-detection of companion files disabled.\n");
         }
 
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-
         transport_t *trans = NULL;
-        if (cfg.is_usb) {
-            trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
-                fprintf(stderr, "[-] Failed to open direct USB interface\n");
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        } else {
-            trans = transport_create_tty();
-            if (!trans || transport_open(trans, port, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to open port %s\n", port);
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        }
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
 
-        if (cfg.verbose) {
-            transport_set_verbose(trans, true);
-        }
-
-        flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_flash(session);
         flasher_destroy(session);
         transport_destroy(trans);
@@ -442,10 +406,11 @@ int main(int argc, char **argv) {
         const char *out_path = "bootrom_pmb8815_32k.bin";
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
             {"out",       required_argument, 0, 'o'},
             {"psi",       required_argument, 0, 1001},
             {"skip-psi-sha256", no_argument, 0, 1020},
@@ -459,9 +424,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:o:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:o:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
@@ -471,35 +437,10 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (!port) {
-            fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
-            return 1;
-        }
-
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-
         transport_t *trans = NULL;
-        if (cfg.is_usb) {
-            trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
-                fprintf(stderr, "[-] Failed to open direct USB interface\n");
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        } else {
-            trans = transport_create_tty();
-            if (!trans || transport_open(trans, port, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to open port %s\n", port);
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        }
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
 
-        if (cfg.verbose) {
-            transport_set_verbose(trans, true);
-        }
-
-        flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_dump_bootrom(session, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
@@ -511,10 +452,11 @@ int main(int argc, char **argv) {
         const char *out_path = "s5222_nvram_backup.bin";
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
             {"skip-psi-sha256", no_argument, 0, 1020},
             {"skip-psi-check",  no_argument, 0, 1020},
@@ -528,9 +470,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:o:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:o:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
@@ -540,35 +483,10 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (!port) {
-            fprintf(stderr, "[-] Error: Port is required (-p usb or -p /dev/ttyACM0)\n");
-            return 1;
-        }
-
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-
         transport_t *trans = NULL;
-        if (cfg.is_usb) {
-            trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
-                fprintf(stderr, "[-] Failed to open direct USB interface\n");
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        } else {
-            trans = transport_create_tty();
-            if (!trans || transport_open(trans, port, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to open port %s\n", port);
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        }
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
 
-        if (cfg.verbose) {
-            transport_set_verbose(trans, true);
-        }
-
-        flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_dump_nvram(session, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
@@ -585,10 +503,11 @@ int main(int argc, char **argv) {
         bool len_set = false;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",       required_argument, 0, 'p'},
+            {"baud",       required_argument, 0, 'b'},
             {"addr",       required_argument, 0, 'a'},
             {"address",    required_argument, 0, 'a'},
             {"len",        required_argument, 0, 'l'},
@@ -609,9 +528,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:a:l:o:c:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:a:l:o:c:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'a': addr = (uint32_t)strtoul(optarg, NULL, 0); addr_set = true; break;
                 case 'l': len = (uint32_t)strtoul(optarg, NULL, 0); len_set = true; break;
                 case 'o': out_path = optarg; break;
@@ -647,34 +567,14 @@ int main(int argc, char **argv) {
             chunk_size = 2048;
         }
 
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-
         if (cfg.psi_path) {
             printf("[*] CLI dump-memory: Configured custom PSI path: %s\n", cfg.psi_path);
         }
 
         transport_t *trans = NULL;
-        if (cfg.is_usb) {
-            trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
-                fprintf(stderr, "[-] Failed to open direct USB interface\n");
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        } else {
-            trans = transport_create_tty();
-            if (!trans || transport_open(trans, port, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to open port %s\n", port);
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        }
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
 
-        if (cfg.verbose) {
-            transport_set_verbose(trans, true);
-        }
-
-        flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_dump_memory(session, addr, len, out_path, chunk_size);
         flasher_destroy(session);
         transport_destroy(trans);
@@ -689,10 +589,11 @@ int main(int argc, char **argv) {
         bool block_set = false;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",        required_argument, 0, 'p'},
+            {"baud",        required_argument, 0, 1030},
             {"block",       required_argument, 0, 'b'},
             {"start-block", required_argument, 0, 'b'},
             {"count",       required_argument, 0, 'c'},
@@ -714,7 +615,17 @@ int main(int argc, char **argv) {
         while ((opt = getopt_long(argc, argv, "p:b:c:o:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
-                case 'b': start_block = (uint32_t)strtoul(optarg, NULL, 0); block_set = true; break;
+                case 'b': {
+                    uint32_t val = (uint32_t)strtoul(optarg, NULL, 0);
+                    if (val >= 9600) {
+                        cfg.baudrate = val;
+                    } else {
+                        start_block = val;
+                        block_set = true;
+                    }
+                    break;
+                }
+                case 1030: cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'c': block_count = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'o': out_path = optarg; break;
                 case 1001: cfg.psi_path = optarg; break;
@@ -746,30 +657,10 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        cfg.is_usb = (strcmp(port, "usb") == 0);
-
         transport_t *trans = NULL;
-        if (cfg.is_usb) {
-            trans = transport_create_usb();
-            if (!trans || transport_open(trans, NULL, cfg.baudrate) != 0) {
-                fprintf(stderr, "[-] Failed to open direct USB interface\n");
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        } else {
-            trans = transport_create_tty();
-            if (!trans || transport_open(trans, port, 115200) != 0) {
-                fprintf(stderr, "[-] Failed to open port %s\n", port);
-                if (trans) transport_destroy(trans);
-                return 1;
-            }
-        }
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
 
-        if (cfg.verbose) {
-            transport_set_verbose(trans, true);
-        }
-
-        flasher_session_t *session = flasher_create(trans, &cfg);
         int res = flasher_dump_nand(session, start_block, block_count, out_path);
         flasher_destroy(session);
         transport_destroy(trans);
@@ -780,10 +671,11 @@ int main(int argc, char **argv) {
         const char *port = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
             {"skip-psi-sha256", no_argument, 0, 1020},
             {"skip-psi-check",  no_argument, 0, 1020},
@@ -796,9 +688,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
@@ -821,10 +714,11 @@ int main(int argc, char **argv) {
         const char *port = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
             {"skip-psi-sha256", no_argument, 0, 1020},
             {"skip-psi-check",  no_argument, 0, 1020},
@@ -837,9 +731,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
@@ -862,10 +757,11 @@ int main(int argc, char **argv) {
         const char *port = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
             {"psi",       required_argument, 0, 1001},
             {"skip-psi-sha256", no_argument, 0, 1020},
             {"skip-psi-check",  no_argument, 0, 1020},
@@ -878,9 +774,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1020: cfg.skip_psi_sha256 = true; break;
                 case 'v': cfg.verbose = true; break;
@@ -910,10 +807,11 @@ int main(int argc, char **argv) {
         size_t max_lines = 8; /* Default: 8 lines = 128 bytes */
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'd'},
+            {"baud",      required_argument, 0, 1030},
             {"block",     required_argument, 0, 'b'},
             {"page",      required_argument, 0, 'P'},
             {"out",       required_argument, 0, 'o'},
@@ -936,7 +834,16 @@ int main(int argc, char **argv) {
         while ((opt = getopt_long(argc, argv, "d:b:P:p:o:l:n:xavh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'd': port = optarg; break;
-                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'b': {
+                    uint32_t val = (uint32_t)strtoul(optarg, NULL, 0);
+                    if (val >= 9600) {
+                        cfg.baudrate = val;
+                    } else {
+                        block = val;
+                    }
+                    break;
+                }
+                case 1030: cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'P': page = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'p':
                     if (optarg[0] >= '0' && optarg[0] <= '9') {
@@ -1004,10 +911,11 @@ int main(int argc, char **argv) {
         uint32_t count = 1;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 1030},
             {"block",     required_argument, 0, 'b'},
             {"count",     required_argument, 0, 'c'},
             {"force-dangerous-erase", no_argument, 0, 1002},
@@ -1026,7 +934,16 @@ int main(int argc, char **argv) {
         while ((opt = getopt_long(argc, argv, "p:b:c:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
-                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'b': {
+                    uint32_t val = (uint32_t)strtoul(optarg, NULL, 0);
+                    if (val >= 9600) {
+                        cfg.baudrate = val;
+                    } else {
+                        block = val;
+                    }
+                    break;
+                }
+                case 1030: cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'c': count = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 1001: cfg.psi_path = optarg; break;
                 case 1002: cfg.force_dangerous_erase = true; break;
@@ -1055,10 +972,11 @@ int main(int argc, char **argv) {
         const char *in_path = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'd'},
+            {"baud",      required_argument, 0, 1030},
             {"block",     required_argument, 0, 'b'},
             {"page",      required_argument, 0, 'P'},
             {"input",     required_argument, 0, 'i'},
@@ -1079,7 +997,16 @@ int main(int argc, char **argv) {
         while ((opt = getopt_long(argc, argv, "d:b:P:p:i:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'd': port = optarg; break;
-                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'b': {
+                    uint32_t val = (uint32_t)strtoul(optarg, NULL, 0);
+                    if (val >= 9600) {
+                        cfg.baudrate = val;
+                    } else {
+                        block = val;
+                    }
+                    break;
+                }
+                case 1030: cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'P':
                     page = (uint32_t)strtoul(optarg, NULL, 0);
                     has_page = true;
@@ -1203,10 +1130,11 @@ int main(int argc, char **argv) {
         const char *port = NULL;
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        cfg.baudrate = 921600;
+        cfg.baudrate = 115200;
 
         static struct option long_options[] = {
             {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
             {"verbose",   no_argument,       0, 'v'},
             {"help",      no_argument,       0, 'h'},
             {0, 0, 0, 0}
@@ -1214,9 +1142,10 @@ int main(int argc, char **argv) {
 
         optind = 2;
         int opt, opt_idx = 0;
-        while ((opt = getopt_long(argc, argv, "p:vh", long_options, &opt_idx)) != -1) {
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
             switch (opt) {
                 case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
                 case 'v': cfg.verbose = true; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default: return 1;

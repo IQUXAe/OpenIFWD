@@ -456,6 +456,57 @@ static void test_psi_flash_block0_geometry(void) {
     printf("[TEST] PSI (Block 0 / BSR) flash geometry PASSED!\n");
 }
 
+static void test_bootrom_uart_telemetry(void) {
+    printf("[TEST] Testing Boot ROM UART 12-byte telemetry frame parsing...\n");
+
+    /* Mock 12-byte Boot ROM response frame */
+    /* 0xF0 0x0A [SCU_CFG CHIP_ID BOOT_MODE PLL_STAT CLK_DIV SCU_RESET PWR_STAT SYS_STAT SEC_STAT] 0xFF */
+    /* Example: Chip ID 0x21 (Step 2, Rev 1), SCU 0x03, Boot 0x01, PLL 0x05, CLK 0x02, RESET 0x00 */
+    uint8_t valid_frame[12] = {
+        0xF0, 0x0A, 0x03, 0x21, 0x01, 0x05, 0x02, 0x00, 0x80, 0x10, 0x00, 0xFF
+    };
+
+    bootrom_uart_telemetry_t telem;
+    int res = bootrom_uart_parse_telemetry(valid_frame, sizeof(valid_frame), &telem);
+    assert(res == 0);
+    assert(telem.scu_cfg == 0x03);
+    assert(telem.chip_id == 0x21);
+    assert(telem.chip_step == 2);
+    assert(telem.chip_rev == 1);
+    assert(telem.boot_mode == 0x01);
+    assert(telem.pll_stat == 0x05);
+    assert(telem.clk_div == 0x02);
+    assert(telem.scu_reset == 0x00);
+    assert(telem.pwr_stat == 0x80);
+    assert(telem.sys_stat == 0x10);
+    assert(telem.sec_stat == 0x00);
+
+    /* Malformed frame tests */
+    /* 1. NULL frame or frame length < 12 */
+    assert(bootrom_uart_parse_telemetry(NULL, 12, &telem) == -1);
+    assert(bootrom_uart_parse_telemetry(valid_frame, 11, &telem) == -1);
+
+    /* 2. Invalid start tag (not 0xF0) */
+    uint8_t bad_start[12];
+    memcpy(bad_start, valid_frame, 12);
+    bad_start[0] = 0xAA;
+    assert(bootrom_uart_parse_telemetry(bad_start, 12, &telem) == -2);
+
+    /* 3. Invalid payload length (not 0x0A) */
+    uint8_t bad_len[12];
+    memcpy(bad_len, valid_frame, 12);
+    bad_len[1] = 0x09;
+    assert(bootrom_uart_parse_telemetry(bad_len, 12, &telem) == -3);
+
+    /* 4. Invalid stop tag (not 0xFF) */
+    uint8_t bad_stop[12];
+    memcpy(bad_stop, valid_frame, 12);
+    bad_stop[11] = 0xFE;
+    assert(bootrom_uart_parse_telemetry(bad_stop, 12, &telem) == -4);
+
+    printf("[+] Boot ROM UART 12-byte telemetry parsing and validation PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running OpenIFWD Unit Tests ===\n");
     test_protocol_packets();
@@ -465,6 +516,7 @@ int main(int argc, char **argv) {
     test_psi_sha256_verification();
     test_slb_multiblock_geometry();
     test_psi_flash_block0_geometry();
+    test_bootrom_uart_telemetry();
 
     const char *sample = (argc >= 2) ? argv[1] : "flashtools/FlashTool_E2_OD/catfish3g.fls";
     test_fls_parsing(sample);

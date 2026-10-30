@@ -8,8 +8,9 @@ Communicates under Linux via direct `libusb-1.0` calls (USB bulk endpoints of Bo
 
 ## Architecture and Execution Flow
 
-1. **Boot ROM Handshake:**
-   When powered on with the Volume Down key held, the on-chip mask Boot ROM (`0x00400000`, 32 KB) enters USB download mode (`VID: 058b`, `PID: 0041`). The host synchronizes using an `ATAT` ping-pong handshake and uploads the Primary Stage Initializer (`psi_ram`) to internal SRAM (`0x00080000`).
+1. **Boot ROM Handshake (USB or UART):**
+   - **USB Mode (`-p usb`):** When powered on with the Volume Down key held, the on-chip mask Boot ROM (`0x00400000`, 32 KB) enters USB download mode (`VID: 058b`, `PID: 0041`). The host synchronizes using an `ATAT` ping-pong handshake and uploads the Primary Stage Initializer (`psi_ram`) to internal SRAM (`0x00080000`).
+   - **UART Mode (`-p /dev/ttyUSB*` / `-p /dev/ttyACM*`, default `-b 115200`):** The silicon Boot ROM polls the serial console (USIF0, 115200 8N1) during the first 20–50 ms after power-on (10 polling attempts). The host continuously transmits `"AT"` (`0x41 0x54`) bursts with 5 ms intervals. Upon matching, Boot ROM responds with a 12-byte telemetry frame (`0xF0 0x0A [telemetry] 0xFF`), reporting Chip ID, silicon revision, SCU configuration, PLL status, and reset cause.
 
 2. **In-RAM Flasher Agent (`open_flasher`):**
    Once PSI initializes system clocks and Mobile DDR SDRAM, the host uploads the bare-metal `open_flasher` payload directly to SDRAM (`0x60000000`, entry point `0x60000400`). The agent takes control, initializes the OneNAND controller (`0x40000000`), and transmits an initialization beacon (`RESP` / `PONG`) to Bulk IN endpoint `EP 0x83`.
@@ -117,13 +118,24 @@ make test
 ## Usage Examples
 
 ### 1. Device Connection
-1. Disconnect the USB cable, remove battery and SIM card.
-2. Launch `openifwd` command (it waits for the USB device).
-3. Hold **Volume Down**, insert the micro-USB cable, then reinsert the battery. The Boot ROM registers as `058b:0041`.
+- **USB Connection (`-p usb`):**
+  1. Disconnect the USB cable, remove battery and SIM card.
+  2. Launch `openifwd` command (it waits for the USB device).
+  3. Hold **Volume Down**, insert the micro-USB cable, then reinsert the battery. The Boot ROM registers as `058b:0041`.
+- **UART Connection (`-p /dev/ttyUSB0` / `-b 115200`):**
+  1. Connect a 3.3V USB-UART adapter (TX/RX) to USIF0 (or micro-USB with JIG resistor 523 kΩ between ID and GND).
+  2. Launch `openifwd` with `-p /dev/ttyUSB0` (it continuously broadcasts `"AT"` probe bursts).
+  3. Power on the phone or insert the battery. The silicon Boot ROM intercepts the `"AT"` sequence, completes the handshake, prints chip telemetry, and enters download mode.
 
 ### 2. Full Firmware Flash
 ```bash
+# Over USB:
 sudo ./openifwd flash -p usb \
+    --psi S5222XXMJ1_psi.fls \
+    --fls S5222XXMJ1_BSY.fls
+
+# Over UART (115200 baud):
+./openifwd flash -p /dev/ttyUSB0 -b 115200 \
     --psi S5222XXMJ1_psi.fls \
     --fls S5222XXMJ1_BSY.fls
 ```

@@ -108,8 +108,31 @@ static inline bool is_flash_range_safe(uint32_t addr, uint32_t length) {
 flasher_session_t *flasher_create(transport_t *transport, const flasher_config_t *cfg);
 void flasher_destroy(flasher_session_t *session);
 
+/* Boot ROM UART Frame Constants (FUN_00400ddc) */
+#define BOOTROM_UART_FRAME_LEN       12U
+#define BOOTROM_UART_START_TAG       0xF0U
+#define BOOTROM_UART_PAYLOAD_LEN     0x0AU
+#define BOOTROM_UART_STOP_TAG        0xFFU
+
+typedef struct {
+    uint8_t scu_cfg;
+    uint8_t chip_id;
+    uint8_t chip_step;
+    uint8_t chip_rev;
+    uint8_t boot_mode;
+    uint8_t pll_stat;
+    uint8_t clk_div;
+    uint8_t scu_reset;
+    uint8_t pwr_stat;
+    uint8_t sys_stat;
+    uint8_t sec_stat;
+} bootrom_uart_telemetry_t;
+
+int bootrom_uart_parse_telemetry(const uint8_t *frame, size_t len, bootrom_uart_telemetry_t *out_telem);
+
 /* Boot ROM Synchronization & PSI Upload */
 int flasher_sync(flasher_session_t *s, int timeout_sec);
+int bootrom_uart_sync(flasher_session_t *s, int timeout_sec);
 int flasher_upload_psi(flasher_session_t *s, const fls_file_t *psi_fls);
 
 /* OpenIFWD Binary Protocol API */
