@@ -432,24 +432,26 @@ static void test_psi_flash_block0_geometry(void) {
         assert(blocks_needed == 1U);
         assert(blocks_needed <= ONENAND_PART_BSR_BLOCKS);
 
-        /* 3. Total pages: ceil(129116 / 2048) == 64 pages */
-        uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
-        assert(total_pages == 64U);
+        /* 3. Total pages under EBL FUN_60018d9c layout:
+         * Page 0 holds strictly 512 bytes BSR header + 1536 bytes 0xFF.
+         * Remaining (payload_len - 512) bytes = 128604 bytes across Pages 1..63.
+         * 128604 / 2048 = 62 full pages + 1628 bytes on Page 63.
+         * Total = 1 + 63 = 64 pages (exact capacity of 1 Block). */
+        uint32_t shift_pages = 1 + (uint32_t)((payload_len - 512 + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+        assert(shift_pages == 64U);
+        size_t last_page_code_bytes = (payload_len - 512) - (62 * ONENAND_PAGE_SIZE);
+        assert(last_page_code_bytes == 1628);
 
         /* 4. Verify all pages target Block 0 */
-        for (uint32_t p = 0; p < total_pages; p++) {
+        for (uint32_t p = 0; p < shift_pages; p++) {
             uint32_t blk = target_block + (p / ONENAND_PAGES_PER_BLOCK);
             uint32_t page = p % ONENAND_PAGES_PER_BLOCK;
             assert(blk == 0);
             assert(page == p);
         }
 
-        /* 5. Verify last page (page 63) payload remainder: 129116 - (63 * 2048) = 92 bytes */
-        size_t last_page_payload_bytes = payload_len - (63 * ONENAND_PAGE_SIZE);
-        assert(last_page_payload_bytes == 92);
-
-        printf("[+] PSI (Block 0 / BSR) geometry validated: %zu bytes -> Block 0, %u pages\n",
-               payload_len, total_pages);
+        printf("[+] PSI (Block 0 / BSR) geometry validated: %zu bytes -> Block 0, %u pages (EBL 0x600 shift aligned)\n",
+               payload_len, shift_pages);
         fls_close(psi);
     }
 

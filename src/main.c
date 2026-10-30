@@ -922,13 +922,12 @@ int main(int argc, char **argv) {
                     printf("\n  Spare Area Sector Breakdown:\n");
                     for (int sec = 0; sec < 4; sec++) {
                         int base = sec * 16;
-                        printf("    Sector %d: User=%02X %02X %02X %02X %02X %02X | Main ECC=%02X %02X | Spare ECC=%02X %02X | Reserved=%02X %02X %02X %02X %02X %02X\n",
+                        printf("    Sector %d: BBM/LSN=%02X %02X %02X %02X %02X %02X %02X %02X | Main ECC=%02X %02X %02X | Spare ECC=%02X %02X | Reserved=%02X %02X %02X\n",
                                sec,
-                               spare_buf[base+0], spare_buf[base+1], spare_buf[base+2],
-                               spare_buf[base+3], spare_buf[base+4], spare_buf[base+5],
-                               spare_buf[base+6], spare_buf[base+7],
-                               spare_buf[base+8], spare_buf[base+9],
-                               spare_buf[base+10], spare_buf[base+11], spare_buf[base+12],
+                               spare_buf[base+0], spare_buf[base+1], spare_buf[base+2], spare_buf[base+3],
+                               spare_buf[base+4], spare_buf[base+5], spare_buf[base+6], spare_buf[base+7],
+                               spare_buf[base+8], spare_buf[base+9], spare_buf[base+10],
+                               spare_buf[base+11], spare_buf[base+12],
                                spare_buf[base+13], spare_buf[base+14], spare_buf[base+15]);
                     }
                 }

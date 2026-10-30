@@ -1923,36 +1923,35 @@ int flasher_ofls_test_ecc(flasher_session_t *s, uint32_t test_block, uint8_t *ou
         printf("Sector %d (Byte 0x%02X..0x%02X):\n", sec, base, base + 15);
         printf("  Raw bytes: ");
         for (int i = 0; i < 16; i++) {
-            if (i == 6 || i == 8) printf("[ ");
+            if (i == 8 || i == 11) printf("[ ");
             printf("%02X ", spare_buf[base + i]);
-            if (i == 7 || i == 9) printf("] ");
+            if (i == 10 || i == 12) printf("] ");
         }
         printf("\n");
 
-        printf("  Field Breakdown:\n");
-        printf("    Bytes 0..5   [User / LSN]:      %02X %02X %02X %02X %02X %02X\n",
-               spare_buf[base+0], spare_buf[base+1], spare_buf[base+2],
-               spare_buf[base+3], spare_buf[base+4], spare_buf[base+5]);
-        printf("    Bytes 6..7   [Main ECC Parity]: %02X %02X ", spare_buf[base+6], spare_buf[base+7]);
-        if (spare_buf[base+6] == 0xFF && spare_buf[base+7] == 0xFF) {
+        printf("  Field Breakdown (Samsung KFM1G16Q2C Layout):\n");
+        printf("    Bytes 0..7   [BBM / LSN Metadata]:  %02X %02X %02X %02X %02X %02X %02X %02X\n",
+               spare_buf[base+0], spare_buf[base+1], spare_buf[base+2], spare_buf[base+3],
+               spare_buf[base+4], spare_buf[base+5], spare_buf[base+6], spare_buf[base+7]);
+        printf("    Bytes 8..10  [Main ECC (24-bit)]:   %02X %02X %02X ",
+               spare_buf[base+8], spare_buf[base+9], spare_buf[base+10]);
+        if (spare_buf[base+8] == 0xFF && spare_buf[base+9] == 0xFF && spare_buf[base+10] == 0xFF) {
             printf("<-- WARNING: ALL 0xFF (ECC NOT GENERATED!)\n");
         } else {
             printf("<-- OK (Hardware Parity Generated!)\n");
         }
 
-        printf("    Bytes 8..9   [Spare ECC Parity]:%02X %02X ", spare_buf[base+8], spare_buf[base+9]);
-        if (spare_buf[base+8] == 0xFF && spare_buf[base+9] == 0xFF) {
+        printf("    Bytes 11..12 [Spare ECC (16-bit)]:  %02X %02X ", spare_buf[base+11], spare_buf[base+12]);
+        if (spare_buf[base+11] == 0xFF && spare_buf[base+12] == 0xFF) {
             printf("<-- WARNING: ALL 0xFF (ECC NOT GENERATED!)\n");
         } else {
             printf("<-- OK (Hardware Parity Generated!)\n");
         }
 
-        printf("    Bytes 10..15 [Status/Reserved]: %02X %02X %02X %02X %02X %02X\n",
-               spare_buf[base+10], spare_buf[base+11], spare_buf[base+12],
+        printf("    Bytes 13..15 [Status/Reserved]:     %02X %02X %02X\n",
                spare_buf[base+13], spare_buf[base+14], spare_buf[base+15]);
 
-        if ((spare_buf[base+6] != 0xFF || spare_buf[base+7] != 0xFF) ||
-            (spare_buf[base+8] != 0xFF || spare_buf[base+9] != 0xFF)) {
+        if (spare_buf[base+8] != 0xFF || spare_buf[base+9] != 0xFF || spare_buf[base+10] != 0xFF) {
             ecc_ok_sectors++;
         }
         printf("\n");
@@ -2131,8 +2130,34 @@ int flasher_flash_psi(flasher_session_t *s, const char *psi_path) {
         return -1;
     }
 
-    uint32_t total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
-    printf("[*] PSI Payload: %zu bytes (Targeting Block 0, %u pages)\n", payload_len, total_pages);
+    /* Check if payload is already in physical flash format (0x200..0x7FF are all 0xFF) */
+    bool is_already_padded = false;
+    if (payload_len >= ONENAND_PAGE_SIZE) {
+        is_already_padded = true;
+        for (size_t i = 0x200; i < 0x800; i++) {
+            if (payload[i] != 0xFF) {
+                is_already_padded = false;
+                break;
+            }
+        }
+    }
+
+    uint32_t total_pages;
+    if (is_already_padded) {
+        total_pages = (uint32_t)((payload_len + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+        printf("[*] PSI Payload: %zu bytes (Pre-padded physical Block 0 layout, %u pages)\n", payload_len, total_pages);
+    } else {
+        total_pages = 1;
+        if (payload_len > 512) {
+            total_pages += (uint32_t)((payload_len - 512 + ONENAND_PAGE_SIZE - 1) / ONENAND_PAGE_SIZE);
+        }
+        printf("[*] PSI Payload: %zu bytes (Unpadded -> applying EBL FUN_60018d9c 0x600 shift: Page 0 = 512 B header, Pages 1..%u = %zu B code)\n",
+               payload_len, total_pages - 1, payload_len > 512 ? (payload_len - 512) : 0);
+    }
+
+    if (total_pages > ONENAND_PAGES_PER_BLOCK) {
+        total_pages = ONENAND_PAGES_PER_BLOCK;
+    }
 
     /* 1. Erase Block 0 (ONENAND_PART_BSR_START = 0, count = 1) */
     printf("[*] Erasing OneNAND Block 0 (BSR)...\n");
@@ -2149,12 +2174,31 @@ int flasher_flash_psi(flasher_session_t *s, const char *psi_path) {
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     for (uint32_t p = 0; p < total_pages; p++) {
-        size_t offset = (size_t)p * ONENAND_PAGE_SIZE;
         memset(page_buf, 0xFF, sizeof(page_buf));
 
-        size_t copy_sz = payload_len - offset;
-        if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
-        memcpy(page_buf, payload + offset, copy_sz);
+        if (is_already_padded) {
+            size_t offset = (size_t)p * ONENAND_PAGE_SIZE;
+            if (offset < payload_len) {
+                size_t copy_sz = payload_len - offset;
+                if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
+                memcpy(page_buf, payload + offset, copy_sz);
+            }
+        } else {
+            /* Factory EBL FUN_60018d9c alignment */
+            if (p == 0) {
+                /* Page 0: First 512 bytes are BSR Header; remaining 1536 bytes remain 0xFF */
+                size_t copy_sz = payload_len < 512 ? payload_len : 512;
+                memcpy(page_buf, payload, copy_sz);
+            } else {
+                /* Pages 1..N: Code payload begins at payload + 0x200 (512) */
+                size_t offset = 512 + (size_t)(p - 1) * ONENAND_PAGE_SIZE;
+                if (offset < payload_len) {
+                    size_t copy_sz = payload_len - offset;
+                    if (copy_sz > ONENAND_PAGE_SIZE) copy_sz = ONENAND_PAGE_SIZE;
+                    memcpy(page_buf, payload + offset, copy_sz);
+                }
+            }
+        }
 
         if (flasher_ofls_write_page(s, ONENAND_PART_BSR_START, p, page_buf, sizeof(page_buf)) != 0) {
             fprintf(stderr, "\n[-] PSI write failed at Block 0, Page %u (page %u / %u)\n",
