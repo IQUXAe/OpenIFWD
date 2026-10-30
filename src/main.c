@@ -1141,6 +1141,14 @@ int main(int argc, char **argv) {
         }
 
         int res = 0;
+        if (block == 0 && (!has_page || page == 0) && file_sz > 512) {
+            fclose(f);
+            res = flasher_flash_psi(session, in_path);
+            flasher_destroy(session);
+            transport_destroy(trans);
+            return res;
+        }
+
         if (!has_page || file_sz > (long)ONENAND_PAGE_SIZE) {
             /* Streaming / multi-block mode */
             uint32_t blocks = (uint32_t)((file_sz + ONENAND_BLOCK_SIZE - 1) / ONENAND_BLOCK_SIZE);

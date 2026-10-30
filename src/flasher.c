@@ -2485,6 +2485,9 @@ int flasher_flash(flasher_session_t *s) {
                 should_flash_psi = true;
             }
             fls_close(test_fls);
+        } else if (access(psi_to_flash, R_OK) == 0) {
+            /* Raw binary payload provided directly (e.g. psi_flash.bin) */
+            should_flash_psi = true;
         }
     }
 
