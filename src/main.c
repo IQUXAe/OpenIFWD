@@ -94,9 +94,12 @@ static void print_usage(const char *prog) {
     printf("  flasher-erase -p <port> -b <block> [-c <count>] Erase OneNAND block(s)\n");
     printf("  flasher-write -p <port> -b <block> --page <page> -i <file> Write 2048-byte OneNAND page\n");
     printf("  flasher-test-ecc -p <port> [-b <block>] Verify OneNAND hardware ECC generation & dump spare\n");
+    printf("  flasher-boot-flag -p <port> [--get] [--set <val>] Query or update firmware Boot Status Flag (Block 995)\n");
     printf("  flasher-reset -p <port>           Reboot phone via Open Flasher agent\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
+    printf("  --get                   Read current 32-bit Boot Status Flag from Block 995\n");
+    printf("  --set <val>             Write 32-bit Boot Status Flag to Block 995 (e.g. 0x00000000, 2)\n");
     printf("  -o, --out, --output <file> Output file for dumps / page read\n");
     printf("  -x, --hex               Display hex dump of read page in console (hexdump -C format)\n");
     printf("  --spare                 Read and display 64-byte Spare Area (OOB) with ECC parity fields\n");
@@ -145,6 +148,8 @@ static void print_usage(const char *prog) {
     printf("  %s flasher-write -p /dev/ttyUSB0 -b 115200 --psi psi.fls -b 0 -i open_psi_block0.bin\n", prog);
     printf("  %s flasher-write -p usb -b 0 -i block0_dump.bin\n", prog);
     printf("  %s flasher-write -p usb -b 10 --page 0 -i custom_payload.bin\n", prog);
+    printf("  %s flasher-boot-flag -p usb --get\n", prog);
+    printf("  %s flasher-boot-flag -p usb --set 0x00000000\n", prog);
     printf("  %s dump-bootrom -p usb -o bootrom_pmb8815_32k.bin -v\n", prog);
     printf("  %s dump-nvram -p /dev/ttyUSB0 -b 115200 -o s5222_nvram_backup.bin -v\n", prog);
     printf("  %s dump-nand -p usb -b 0 -c 1 -o nand_block0_boot.bin -v\n", prog);
@@ -1305,6 +1310,93 @@ int main(int argc, char **argv) {
         if (!session) return 1;
 
         int res = flasher_ofls_reset(session);
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-boot-flag") == 0) {
+        const char *port = NULL;
+        bool do_get = false;
+        bool do_set = false;
+        uint32_t set_val = 0;
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 115200;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 'b'},
+            {"get",       no_argument,       0, 'g'},
+            {"set",       required_argument, 0, 's'},
+            {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:b:gs:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'b': cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 'g': do_get = true; break;
+                case 's':
+                    do_set = true;
+                    set_val = (uint32_t)strtoul(optarg, NULL, 0);
+                    break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        if (!do_get && !do_set) {
+            /* Default action is get */
+            do_get = true;
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = 0;
+        if (do_get) {
+            uint32_t curr_flag = 0;
+            res = flasher_get_boot_flag(session, &curr_flag);
+            if (res == 0) {
+                printf("[+] Boot Status Flag (Block %u, Page %u, offset 0x%03X): 0x%08X (%u)\n",
+                       ONENAND_BOOT_FLAG_BLOCK, ONENAND_BOOT_FLAG_PAGE, ONENAND_BOOT_FLAG_OFFSET, curr_flag, curr_flag);
+                if (curr_flag == 0x00000000) {
+                    printf("    Status: NORMAL_BOOT (0x00000000 - Flashing finalized, normal boot allowed)\n");
+                } else if (curr_flag == 0x00000002) {
+                    printf("    Status: FLASHING_IN_PROGRESS / INTERRUPTED (0x00000002 - Phone will bootloop until reset to 0x00000000)\n");
+                } else if (curr_flag == 0xFFFFFFFF) {
+                    printf("    Status: ERASED / UNINITIALIZED (0xFFFFFFFF)\n");
+                } else {
+                    printf("    Status: CUSTOM / UNKNOWN (0x%08X)\n", curr_flag);
+                }
+            } else {
+                fprintf(stderr, "[-] Failed to read Boot Status Flag\n");
+            }
+        }
+
+        if (do_set && res == 0) {
+            res = flasher_set_boot_flag(session, set_val);
+            if (res == 0) {
+                printf("[+] Boot Status Flag successfully updated to 0x%08X\n", set_val);
+            } else {
+                fprintf(stderr, "[-] Failed to set Boot Status Flag to 0x%08X\n", set_val);
+            }
+        }
+
         flasher_destroy(session);
         transport_destroy(trans);
         return res;

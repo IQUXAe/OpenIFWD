@@ -774,7 +774,7 @@ int flasher_open_get_hw_info(flasher_session_t *s, openifwd_hw_info_t *out_info)
 }
 
 int flasher_open_erase_block(flasher_session_t *s, uint32_t block) {
-    if (block >= ONENAND_PROTECTED_BLOCK_START) {
+    if (ONENAND_IS_PROTECTED_BLOCK(block)) {
         if (!s || !s->config.force_dangerous_erase) {
             fprintf(stderr, "[-] ERROR: Block %u is in protected calibration/metadata area (978..1023)!\n", block);
             fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
@@ -789,7 +789,7 @@ int flasher_open_erase_block(flasher_session_t *s, uint32_t block) {
 
 int flasher_open_write_page(flasher_session_t *s, uint32_t block, uint16_t page, const uint8_t *data, const uint8_t *spare) {
     if (!data) return -1;
-    if (block >= ONENAND_PROTECTED_BLOCK_START) {
+    if (ONENAND_IS_PROTECTED_BLOCK(block)) {
         if (!s || !s->config.force_dangerous_erase) {
             fprintf(stderr, "[-] ERROR: Block %u is in protected calibration/metadata area (978..1023)!\n", block);
             fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
@@ -1677,8 +1677,15 @@ int flasher_ofls_id(flasher_session_t *s, uint16_t *out_mfr, uint16_t *out_dev) 
 int flasher_ofls_erase(flasher_session_t *s, uint32_t block, uint32_t count) {
     if (count == 0) count = 1;
 
-    /* NVRAM & Metadata Protection Check */
-    if (block >= ONENAND_PROTECTED_BLOCK_START || (block + count) > ONENAND_PROTECTED_BLOCK_START) {
+    /* NVRAM & Metadata Protection Check: allow Block 995 if count == 1 */
+    bool range_protected = false;
+    if (block == ONENAND_BOOT_FLAG_BLOCK && count == 1) {
+        range_protected = false;
+    } else if (block >= ONENAND_PROTECTED_BLOCK_START || (block + count) > ONENAND_PROTECTED_BLOCK_START) {
+        range_protected = true;
+    }
+
+    if (range_protected) {
         if (!s || !s->config.force_dangerous_erase) {
             fprintf(stderr, "[-] ERROR: Block range %u..%u targets protected calibration/metadata area (978..1023)!\n",
                     block, block + count - 1);
@@ -1728,7 +1735,7 @@ int flasher_ofls_write_page(flasher_session_t *s, uint32_t block, uint32_t page,
     if (!data || len == 0) return -1;
 
     /* NVRAM & Metadata Protection Check */
-    if (block >= ONENAND_PROTECTED_BLOCK_START) {
+    if (ONENAND_IS_PROTECTED_BLOCK(block)) {
         if (!s || !s->config.force_dangerous_erase) {
             fprintf(stderr, "[-] ERROR: Block %u is in protected calibration/metadata area (978..1023)!\n", block);
             fprintf(stderr, "[-] Operation aborted to prevent permanent loss of RF calibration & IMEI.\n");
@@ -1980,6 +1987,87 @@ int flasher_ofls_reset(flasher_session_t *s) {
     return 0;
 }
 
+int flasher_get_boot_flag(flasher_session_t *s, uint32_t *flag_out) {
+    if (!s || !flag_out) return -1;
+    uint8_t page_buf[ONENAND_PAGE_SIZE];
+    int rc = flasher_ofls_read_page(s, ONENAND_BOOT_FLAG_BLOCK, ONENAND_BOOT_FLAG_PAGE, page_buf, sizeof(page_buf));
+    if (rc != 0 && rc != 5) {
+        fprintf(stderr, "[-] Failed to read Boot Flag page (Block %u, Page %u, rc=%d)\n",
+                ONENAND_BOOT_FLAG_BLOCK, ONENAND_BOOT_FLAG_PAGE, rc);
+        return -1;
+    }
+    uint32_t val = (uint32_t)page_buf[ONENAND_BOOT_FLAG_OFFSET] |
+                   ((uint32_t)page_buf[ONENAND_BOOT_FLAG_OFFSET + 1] << 8) |
+                   ((uint32_t)page_buf[ONENAND_BOOT_FLAG_OFFSET + 2] << 16) |
+                   ((uint32_t)page_buf[ONENAND_BOOT_FLAG_OFFSET + 3] << 24);
+    *flag_out = val;
+    return 0;
+}
+
+int flasher_set_boot_flag(flasher_session_t *s, uint32_t flag_val) {
+    if (!s) return -1;
+    printf("[*] Updating Boot Status Flag in Block %u to 0x%08X...\n", ONENAND_BOOT_FLAG_BLOCK, flag_val);
+    uint8_t *block_buf = malloc(ONENAND_BLOCK_SIZE);
+    if (!block_buf) return -ENOMEM;
+
+    /* 1. Read all 64 pages of Block 995 */
+    printf("[*] Reading existing %u pages of Block %u...\n", ONENAND_PAGES_PER_BLOCK, ONENAND_BOOT_FLAG_BLOCK);
+    for (uint32_t p = 0; p < ONENAND_PAGES_PER_BLOCK; p++) {
+        int rc = flasher_ofls_read_page(s, ONENAND_BOOT_FLAG_BLOCK, p, block_buf + p * ONENAND_PAGE_SIZE, ONENAND_PAGE_SIZE);
+        if (rc != 0 && rc != 5) {
+            fprintf(stderr, "[-] Failed reading Block %u Page %u (rc=%d)\n", ONENAND_BOOT_FLAG_BLOCK, p, rc);
+            free(block_buf);
+            return -1;
+        }
+    }
+
+    /* 2. Update flag_val at offset 0x7FC of Page 63 */
+    uint32_t flag_off = ONENAND_BOOT_FLAG_PAGE * ONENAND_PAGE_SIZE + ONENAND_BOOT_FLAG_OFFSET;
+    block_buf[flag_off + 0] = (uint8_t)(flag_val & 0xFF);
+    block_buf[flag_off + 1] = (uint8_t)((flag_val >> 8) & 0xFF);
+    block_buf[flag_off + 2] = (uint8_t)((flag_val >> 16) & 0xFF);
+    block_buf[flag_off + 3] = (uint8_t)((flag_val >> 24) & 0xFF);
+
+    /* 3. Erase Block 995 */
+    printf("[*] Erasing Block %u...\n", ONENAND_BOOT_FLAG_BLOCK);
+    int rc = flasher_ofls_erase(s, ONENAND_BOOT_FLAG_BLOCK, 1);
+    if (rc != 0) {
+        fprintf(stderr, "[-] Failed to erase Block %u (rc=%d)\n", ONENAND_BOOT_FLAG_BLOCK, rc);
+        free(block_buf);
+        return -1;
+    }
+
+    /* 4. Write back pages: skip all-0xFF pages 0..62, always write Page 63 */
+    printf("[*] Writing back Block %u pages...\n", ONENAND_BOOT_FLAG_BLOCK);
+    for (uint32_t p = 0; p < ONENAND_PAGES_PER_BLOCK; p++) {
+        const uint8_t *pdata = block_buf + p * ONENAND_PAGE_SIZE;
+        bool has_data = (p == ONENAND_BOOT_FLAG_PAGE);
+        if (!has_data) {
+            for (size_t i = 0; i < ONENAND_PAGE_SIZE; i++) {
+                if (pdata[i] != 0xFF) { has_data = true; break; }
+            }
+        }
+        if (has_data) {
+            rc = flasher_ofls_write_page(s, ONENAND_BOOT_FLAG_BLOCK, p, pdata, ONENAND_PAGE_SIZE);
+            if (rc != 0) {
+                fprintf(stderr, "[-] Failed to write back Block %u Page %u (rc=%d)\n", ONENAND_BOOT_FLAG_BLOCK, p, rc);
+                free(block_buf);
+                return -1;
+            }
+        }
+    }
+    free(block_buf);
+
+    /* 5. Verify read-back */
+    uint32_t verified = 0xFFFFFFFF;
+    if (flasher_get_boot_flag(s, &verified) != 0 || verified != flag_val) {
+        fprintf(stderr, "[-] Boot flag verification failed: expected 0x%08X, got 0x%08X\n", flag_val, verified);
+        return -1;
+    }
+    printf("[+] Boot Status Flag in Block %u successfully set to 0x%08X!\n", ONENAND_BOOT_FLAG_BLOCK, flag_val);
+    return 0;
+}
+
 int flasher_flash_binary_to_partition(flasher_session_t *s, const char *bin_path, uint32_t start_block, uint32_t max_blocks, const char *label) {
     if (!s || !bin_path || access(bin_path, R_OK) != 0) {
         fprintf(stderr, "[-] Cannot access %s file: %s (%s)\n", label, bin_path ? bin_path : "<null>", strerror(errno));
@@ -2222,6 +2310,12 @@ int flasher_flash_psi(flasher_session_t *s, const char *psi_path) {
 
     if (fls) fls_close(fls);
     if (raw_buf) free(raw_buf);
+
+    /* Reset Boot Status Flag in Block 995 to 0x00000000 per factory EBL algorithm */
+    if (flasher_set_boot_flag(s, 0x00000000) != 0) {
+        fprintf(stderr, "[!] Warning: Failed to reset Boot Status Flag in Block %u\n", ONENAND_BOOT_FLAG_BLOCK);
+    }
+
     return 0;
 }
 
@@ -2567,6 +2661,12 @@ int flasher_flash(flasher_session_t *s) {
 
     printf("\n================================================================================\n");
     printf("[+] Flashing complete! (%d component(s) successfully written)\n", flashed_count);
+
+    /* Reset Boot Status Flag in Block 995 to 0x00000000 per factory EBL algorithm */
+    if (flasher_set_boot_flag(s, 0x00000000) != 0) {
+        fprintf(stderr, "[!] Warning: Failed to reset Boot Status Flag in Block %u\n", ONENAND_BOOT_FLAG_BLOCK);
+    }
+
     printf("[*] Resetting and rebooting device...\n");
     printf("================================================================================\n");
     flasher_ofls_reset(s);

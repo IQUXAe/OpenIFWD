@@ -90,6 +90,10 @@ typedef struct {
 
 /* OneNAND Hardware Calibration & Metadata Protected Range: Blocks 978..1023 */
 #define ONENAND_PROTECTED_BLOCK_START 978U
+#define ONENAND_BOOT_FLAG_BLOCK      995U
+#define ONENAND_BOOT_FLAG_PAGE       63U
+#define ONENAND_BOOT_FLAG_OFFSET     0x7FCU
+#define ONENAND_IS_PROTECTED_BLOCK(b) (((uint32_t)(b)) >= ONENAND_PROTECTED_BLOCK_START && ((uint32_t)(b)) != ONENAND_BOOT_FLAG_BLOCK)
 #define ONENAND_TOTAL_BLOCKS         1024U
 
 /* Magic Tokens for RAM Dumper */
@@ -196,6 +200,8 @@ int flasher_ofls_read_page(flasher_session_t *s, uint32_t block, uint32_t page, 
 int flasher_ofls_read_page_raw(flasher_session_t *s, uint32_t block, uint32_t page, uint8_t *out_data, uint8_t *out_spare);
 int flasher_ofls_test_ecc(flasher_session_t *s, uint32_t test_block, uint8_t *out_spare);
 int flasher_ofls_reset(flasher_session_t *s);
+int flasher_get_boot_flag(flasher_session_t *s, uint32_t *flag_out);
+int flasher_set_boot_flag(flasher_session_t *s, uint32_t flag_val);
 void flasher_hexdump(const uint8_t *data, size_t len, size_t max_lines);
 
 #ifdef __cplusplus

@@ -509,6 +509,45 @@ static void test_bootrom_uart_telemetry(void) {
     printf("[+] Boot ROM UART 12-byte telemetry parsing and validation PASSED!\n");
 }
 
+static void test_boot_flag_protection_and_geometry(void) {
+    printf("[TEST] Testing Boot Status Flag (Block 995) geometry and protection rules...\n");
+
+    /* 1. Verify Constants */
+    assert(ONENAND_BOOT_FLAG_BLOCK == 995U);
+    assert(ONENAND_BOOT_FLAG_PAGE == 63U);
+    assert(ONENAND_BOOT_FLAG_OFFSET == 0x7FCU);
+
+    /* 2. Verify Protection Logic */
+    assert(ONENAND_IS_PROTECTED_BLOCK(0) == 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(2) == 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(10) == 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(977) == 0);
+
+    /* Blocks 978..994 MUST be protected */
+    assert(ONENAND_IS_PROTECTED_BLOCK(978) != 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(985) != 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(994) != 0);
+
+    /* Block 995 MUST be permitted (for Boot Status Flag update) */
+    assert(ONENAND_IS_PROTECTED_BLOCK(995) == 0);
+
+    /* Blocks 996..1023 MUST remain protected */
+    assert(ONENAND_IS_PROTECTED_BLOCK(996) != 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(1022) != 0);
+    assert(ONENAND_IS_PROTECTED_BLOCK(1023) != 0);
+
+    /* 3. Verify Geometry & Addresses */
+    uint32_t block_byte_offset = (ONENAND_BOOT_FLAG_PAGE * ONENAND_PAGE_SIZE) + ONENAND_BOOT_FLAG_OFFSET;
+    assert(block_byte_offset == 0x1FFFCU);
+
+    uint32_t chip_phys_addr = (ONENAND_BOOT_FLAG_BLOCK * ONENAND_BLOCK_SIZE) + block_byte_offset;
+    assert(chip_phys_addr == 0x07C7FFFCU);
+
+    printf("[+] Boot Status Flag geometry verified: Block 995, Page 63, Offset 0x7FC (Phys 0x%08X)\n", chip_phys_addr);
+    printf("[+] NVRAM Protection verified: 978..994 & 996..1023 protected, 995 permitted\n");
+    printf("[TEST] Boot Status Flag protection & geometry PASSED!\n");
+}
+
 int main(int argc, char **argv) {
     printf("=== Running OpenIFWD Unit Tests ===\n");
     test_protocol_packets();
@@ -519,6 +558,7 @@ int main(int argc, char **argv) {
     test_slb_multiblock_geometry();
     test_psi_flash_block0_geometry();
     test_bootrom_uart_telemetry();
+    test_boot_flag_protection_and_geometry();
 
     const char *sample = (argc >= 2) ? argv[1] : "flashtools/FlashTool_E2_OD/catfish3g.fls";
     test_fls_parsing(sample);
