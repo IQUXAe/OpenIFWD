@@ -170,6 +170,8 @@ int flasher_flash_fls_container(flasher_session_t *s, const char *fls_path);
 #define OFLS_CMD_PAGE_WRITE          0x04U
 #define OFLS_CMD_PAGE_READ           0x05U
 #define OFLS_CMD_RESET               0x06U
+#define OFLS_CMD_TEST_ECC            0x07U
+#define OFLS_CMD_PAGE_READ_RAW       0x08U
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;    /* 'OFLS' (0x534C464F) */
@@ -191,6 +193,8 @@ int flasher_ofls_id(flasher_session_t *s, uint16_t *out_mfr, uint16_t *out_dev);
 int flasher_ofls_erase(flasher_session_t *s, uint32_t block, uint32_t count);
 int flasher_ofls_write_page(flasher_session_t *s, uint32_t block, uint32_t page, const uint8_t *data, size_t len);
 int flasher_ofls_read_page(flasher_session_t *s, uint32_t block, uint32_t page, uint8_t *out_data, size_t len);
+int flasher_ofls_read_page_raw(flasher_session_t *s, uint32_t block, uint32_t page, uint8_t *out_data, uint8_t *out_spare);
+int flasher_ofls_test_ecc(flasher_session_t *s, uint32_t test_block, uint8_t *out_spare);
 int flasher_ofls_reset(flasher_session_t *s);
 void flasher_hexdump(const uint8_t *data, size_t len, size_t max_lines);
 

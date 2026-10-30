@@ -89,15 +89,17 @@ static void print_usage(const char *prog) {
     printf("  flasher-boot -p <port>            Bootstrap & start Open Flasher agent in SDRAM\n");
     printf("  flasher-ping -p <port>            Ping Open Flasher agent\n");
     printf("  flasher-id   -p <port>            Query OneNAND Manufacturer and Device ID\n");
-    printf("  flasher-read -p <port> -b <block> --page <page> [-o <file>] [-x] [--lines N] [--all]\n");
-    printf("                                    Read 2048-byte OneNAND page (hexdump or save to file)\n");
+    printf("  flasher-read -p <port> -b <block> --page <page> [-o <file>] [-x] [--lines N] [--all] [--spare]\n");
+    printf("                                    Read 2048-byte OneNAND page (hexdump, spare dump, or file)\n");
     printf("  flasher-erase -p <port> -b <block> [-c <count>] Erase OneNAND block(s)\n");
     printf("  flasher-write -p <port> -b <block> --page <page> -i <file> Write 2048-byte OneNAND page\n");
+    printf("  flasher-test-ecc -p <port> [-b <block>] Verify OneNAND hardware ECC generation & dump spare\n");
     printf("  flasher-reset -p <port>           Reboot phone via Open Flasher agent\n\n");
     printf("Options:\n");
     printf("  -p, --port <device>     Serial port (/dev/ttyACM0, /dev/ttyUSB0, or 'usb')\n");
     printf("  -o, --out, --output <file> Output file for dumps / page read\n");
     printf("  -x, --hex               Display hex dump of read page in console (hexdump -C format)\n");
+    printf("  --spare                 Read and display 64-byte Spare Area (OOB) with ECC parity fields\n");
     printf("  -l, --lines <num>       Number of 16-byte hex dump lines to display (default: 8 = 128 bytes)\n");
     printf("  -a, --all, --full       Display full 2048-byte page hex dump (all 128 lines)\n");
     printf("  -i, --in, --input <file> Input file for page write\n");
@@ -805,6 +807,7 @@ int main(int argc, char **argv) {
         const char *out_path = NULL;
         bool hex_mode = false;
         bool full_page = false;
+        bool dump_spare = false;
         size_t max_lines = 8; /* Default: 8 lines = 128 bytes */
         flasher_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -817,6 +820,7 @@ int main(int argc, char **argv) {
             {"page",      required_argument, 0, 'P'},
             {"out",       required_argument, 0, 'o'},
             {"hex",       no_argument,       0, 'x'},
+            {"spare",     no_argument,       0, 1060},
             {"lines",     required_argument, 0, 'l'},
             {"all",       no_argument,       0, 'a'},
             {"full",      no_argument,       0, 'a'},
@@ -855,6 +859,7 @@ int main(int argc, char **argv) {
                     break;
                 case 'o': out_path = optarg; break;
                 case 'x': hex_mode = true; break;
+                case 1060: dump_spare = true; hex_mode = true; break;
                 case 'l':
                 case 'n':
                     max_lines = (size_t)strtoul(optarg, NULL, 0);
@@ -883,24 +888,99 @@ int main(int argc, char **argv) {
         if (!session) return 1;
 
         uint8_t page_buf[2048];
-        int res = flasher_ofls_read_page(session, block, page, page_buf, 2048);
+        uint8_t spare_buf[64];
+        int res;
+        if (dump_spare) {
+            res = flasher_ofls_read_page_raw(session, block, page, page_buf, spare_buf);
+        } else {
+            res = flasher_ofls_read_page(session, block, page, page_buf, 2048);
+        }
+
         if (res == 0) {
             if (out_path && !hex_mode) {
                 FILE *f = fopen(out_path, "wb");
                 if (f) {
                     fwrite(page_buf, 1, 2048, f);
+                    if (dump_spare) {
+                        fwrite(spare_buf, 1, 64, f);
+                    }
                     fclose(f);
-                    printf("[+] Saved 2048 bytes of Block %u, Page %u to %s\n", block, page, out_path);
+                    printf("[+] Saved %u bytes of Block %u, Page %u to %s\n",
+                           dump_spare ? 2112 : 2048, block, page, out_path);
                 } else {
                     fprintf(stderr, "[-] Failed to open output file: %s (%s)\n", out_path, strerror(errno));
                     res = 1;
                 }
             } else {
-                printf("[*] OneNAND Block %u, Page %u (2048 bytes):\n", block, page);
+                printf("[*] OneNAND Block %u, Page %u Data (2048 bytes):\n", block, page);
                 flasher_hexdump(page_buf, 2048, full_page ? 0 : max_lines);
+
+                if (dump_spare) {
+                    printf("\n[*] OneNAND Block %u, Page %u Spare Area (64 bytes OOB):\n", block, page);
+                    flasher_hexdump(spare_buf, 64, 4);
+
+                    printf("\n  Spare Area Sector Breakdown:\n");
+                    for (int sec = 0; sec < 4; sec++) {
+                        int base = sec * 16;
+                        printf("    Sector %d: User=%02X %02X %02X %02X %02X %02X | Main ECC=%02X %02X | Spare ECC=%02X %02X | Reserved=%02X %02X %02X %02X %02X %02X\n",
+                               sec,
+                               spare_buf[base+0], spare_buf[base+1], spare_buf[base+2],
+                               spare_buf[base+3], spare_buf[base+4], spare_buf[base+5],
+                               spare_buf[base+6], spare_buf[base+7],
+                               spare_buf[base+8], spare_buf[base+9],
+                               spare_buf[base+10], spare_buf[base+11], spare_buf[base+12],
+                               spare_buf[base+13], spare_buf[base+14], spare_buf[base+15]);
+                    }
+                }
             }
         }
 
+        flasher_destroy(session);
+        transport_destroy(trans);
+        return res;
+    }
+
+    if (strcmp(cmd, "flasher-test-ecc") == 0) {
+        const char *port = NULL;
+        uint32_t block = 10; /* Default test scratch block: 10 */
+        flasher_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.baudrate = 115200;
+
+        static struct option long_options[] = {
+            {"port",      required_argument, 0, 'p'},
+            {"baud",      required_argument, 0, 1030},
+            {"block",     required_argument, 0, 'b'},
+            {"psi",       required_argument, 0, 1001},
+            {"skip-psi-sha256", no_argument, 0, 1020},
+            {"skip-psi-check",  no_argument, 0, 1020},
+            {"skip-psi-hash",   no_argument, 0, 1020},
+            {"no-psi-check",    no_argument, 0, 1020},
+            {"verbose",   no_argument,       0, 'v'},
+            {"help",      no_argument,       0, 'h'},
+            {0, 0, 0, 0}
+        };
+
+        optind = 2;
+        int opt, opt_idx = 0;
+        while ((opt = getopt_long(argc, argv, "p:b:vh", long_options, &opt_idx)) != -1) {
+            switch (opt) {
+                case 'p': port = optarg; break;
+                case 'b': block = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 1030: cfg.baudrate = (uint32_t)strtoul(optarg, NULL, 0); break;
+                case 1001: cfg.psi_path = optarg; break;
+                case 1020: cfg.skip_psi_sha256 = true; break;
+                case 'v': cfg.verbose = true; break;
+                case 'h': print_usage(argv[0]); return 0;
+                default: return 1;
+            }
+        }
+
+        transport_t *trans = NULL;
+        flasher_session_t *session = init_session(port, &cfg, &trans);
+        if (!session) return 1;
+
+        int res = flasher_ofls_test_ecc(session, block, NULL);
         flasher_destroy(session);
         transport_destroy(trans);
         return res;

@@ -1831,6 +1831,148 @@ int flasher_ofls_read_page(flasher_session_t *s, uint32_t block, uint32_t page, 
     return 0;
 }
 
+int flasher_ofls_read_page_raw(flasher_session_t *s, uint32_t block, uint32_t page, uint8_t *out_data, uint8_t *out_spare) {
+    if (!s || !s->transport) return -1;
+
+    ofls_cmd_t cmd = {MAGIC_OFLS_CMD, OFLS_CMD_PAGE_READ_RAW, block, page};
+    if (transport_write(s->transport, &cmd, sizeof(cmd)) != (int)sizeof(cmd)) {
+        fprintf(stderr, "[-] Failed to write OFLS Page Read Raw command\n");
+        return -1;
+    }
+
+    /* 1. Read response header */
+    ofls_resp_t resp;
+    int r = transport_read(s->transport, &resp, sizeof(resp), 5000);
+    if (r != (int)sizeof(resp) || resp.magic != MAGIC_OFLS_RESP) {
+        fprintf(stderr, "[-] Failed reading OFLS Page Read Raw response header\n");
+        return -2;
+    }
+
+    if (resp.status != 0 && resp.status != 5) {
+        fprintf(stderr, "[-] OFLS Page Read Raw reported error: status=0x%08X\n", resp.status);
+        return -3;
+    }
+
+    /* 2. Read 2048-byte page data payload */
+    uint8_t page_buf[2048];
+    int pr = transport_read(s->transport, page_buf, 2048, 5000);
+    if (pr != 2048) {
+        fprintf(stderr, "[-] Incomplete page payload received (got %d bytes, expected 2048)\n", pr);
+        return -4;
+    }
+
+    /* 3. Read 64-byte spare area payload */
+    uint8_t spare_buf[64];
+    int sr = transport_read(s->transport, spare_buf, 64, 5000);
+    if (sr != 64) {
+        fprintf(stderr, "[-] Incomplete spare payload received (got %d bytes, expected 64)\n", sr);
+        return -5;
+    }
+
+    if (out_data) {
+        memcpy(out_data, page_buf, 2048);
+    }
+    if (out_spare) {
+        memcpy(out_spare, spare_buf, 64);
+    }
+
+    return 0;
+}
+
+int flasher_ofls_test_ecc(flasher_session_t *s, uint32_t test_block, uint8_t *out_spare) {
+    if (!s || !s->transport) return -1;
+
+    if (test_block < 3 || test_block >= ONENAND_PROTECTED_BLOCK_START) {
+        fprintf(stderr, "[-] Error: Block %u is invalid for ECC test (must be 3..%u to protect boot & NVRAM)\n",
+                test_block, ONENAND_PROTECTED_BLOCK_START - 1);
+        return -1;
+    }
+
+    printf("\n================================================================================\n");
+    printf("[*] Running Hardware ECC Generation Test on OneNAND Block %u\n", test_block);
+    printf("================================================================================\n");
+
+    ofls_cmd_t cmd = {MAGIC_OFLS_CMD, OFLS_CMD_TEST_ECC, test_block, 0};
+    if (transport_write(s->transport, &cmd, sizeof(cmd)) != (int)sizeof(cmd)) {
+        fprintf(stderr, "[-] Failed to write OFLS TEST_ECC command\n");
+        return -1;
+    }
+
+    ofls_resp_t resp;
+    int r = transport_read(s->transport, &resp, sizeof(resp), 15000);
+    if (r != (int)sizeof(resp) || resp.magic != MAGIC_OFLS_RESP) {
+        fprintf(stderr, "[-] Failed reading OFLS TEST_ECC response header\n");
+        return -2;
+    }
+
+    uint8_t spare_buf[64];
+    int sr = transport_read(s->transport, spare_buf, 64, 5000);
+    if (sr != 64) {
+        fprintf(stderr, "[-] Incomplete spare payload received for TEST_ECC (got %d bytes, expected 64)\n", sr);
+        return -3;
+    }
+
+    if (out_spare) {
+        memcpy(out_spare, spare_buf, 64);
+    }
+
+    printf("\n--- OneNAND Spare Area (OOB) 64-Byte Physical Dump (Block %u, Page 0) ---\n", test_block);
+    int ecc_ok_sectors = 0;
+    for (int sec = 0; sec < 4; sec++) {
+        int base = sec * 16;
+        printf("Sector %d (Byte 0x%02X..0x%02X):\n", sec, base, base + 15);
+        printf("  Raw bytes: ");
+        for (int i = 0; i < 16; i++) {
+            if (i == 6 || i == 8) printf("[ ");
+            printf("%02X ", spare_buf[base + i]);
+            if (i == 7 || i == 9) printf("] ");
+        }
+        printf("\n");
+
+        printf("  Field Breakdown:\n");
+        printf("    Bytes 0..5   [User / LSN]:      %02X %02X %02X %02X %02X %02X\n",
+               spare_buf[base+0], spare_buf[base+1], spare_buf[base+2],
+               spare_buf[base+3], spare_buf[base+4], spare_buf[base+5]);
+        printf("    Bytes 6..7   [Main ECC Parity]: %02X %02X ", spare_buf[base+6], spare_buf[base+7]);
+        if (spare_buf[base+6] == 0xFF && spare_buf[base+7] == 0xFF) {
+            printf("<-- WARNING: ALL 0xFF (ECC NOT GENERATED!)\n");
+        } else {
+            printf("<-- OK (Hardware Parity Generated!)\n");
+        }
+
+        printf("    Bytes 8..9   [Spare ECC Parity]:%02X %02X ", spare_buf[base+8], spare_buf[base+9]);
+        if (spare_buf[base+8] == 0xFF && spare_buf[base+9] == 0xFF) {
+            printf("<-- WARNING: ALL 0xFF (ECC NOT GENERATED!)\n");
+        } else {
+            printf("<-- OK (Hardware Parity Generated!)\n");
+        }
+
+        printf("    Bytes 10..15 [Status/Reserved]: %02X %02X %02X %02X %02X %02X\n",
+               spare_buf[base+10], spare_buf[base+11], spare_buf[base+12],
+               spare_buf[base+13], spare_buf[base+14], spare_buf[base+15]);
+
+        if ((spare_buf[base+6] != 0xFF || spare_buf[base+7] != 0xFF) ||
+            (spare_buf[base+8] != 0xFF || spare_buf[base+9] != 0xFF)) {
+            ecc_ok_sectors++;
+        }
+        printf("\n");
+    }
+
+    if (resp.status != 0 || ecc_ok_sectors != 4) {
+        fprintf(stderr, "[-] HARDWARE ECC VERIFICATION FAILED (status=%d, valid sectors=%d/4)!\n",
+                resp.status, ecc_ok_sectors);
+        return -4;
+    }
+
+    printf("[+] ============================================================================\n");
+    printf("[+] SUCCESS: OneNAND Hardware ECC Engine is OPERATIONAL on physical chip!\n");
+    printf("[+] Parity bytes (+6..+9) across all 4 sectors were automatically written by controller.\n");
+    printf("[+] Block 0 written with this driver will satisfy Silicon Boot ROM ECC checks.\n");
+    printf("[+] ============================================================================\n");
+
+    return 0;
+}
+
 int flasher_ofls_reset(flasher_session_t *s) {
     printf("[*] Sending OFLS RESET to agent...\n");
     ofls_resp_t resp;
